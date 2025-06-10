@@ -1,0 +1,98 @@
+# data: 
+#   id: "Ankursingh/openwebtext_10K" 
+#   cache_dir: "/content/cache"
+#   stream: false
+
+# model:
+#   type: gpt2
+#   hidden_dim: 576
+#   num_heads: 12  
+#   num_layers: 12  
+#   seq_len: 512 
+#   embed_pdrop: 0.1
+#   resid_pdrop: 0.1
+#   attn_pdrop: 0.1
+
+# trainer:
+#   wandb:
+#     name: "nano_gpt2_neuralode"
+#     project: "qkvflow"
+#     tags: ["ankursingh", "nano", "gpt2", "neuralode"]
+  
+#   mp: p=f32,c=bfloat16
+#   per_device_eval_parallelism: 1
+#   per_device_parallelism: 1
+#   train_batch_size: 12           
+#   num_train_steps: 5000 
+#   steps_per_eval: 100   
+  
+#   tensor_parallel_axes: ["mlp", "heads"]
+#   fsdp_axis: "embed"
+#   batch_axis: "batch"
+  
+#   checkpointer: 
+#     save_interval: 45min 
+#     keep:
+#       - every: 1000
+#         until: 5001
+#     base_path: "/content/drive/MyDrive/nano_gpt2_neuralode_checkpoints/"
+
+# optimizer:
+#   learning_rate: 4E-4      
+#   weight_decay: 0.08
+#   min_lr_ratio: 0.1
+
+# model_choice: neuralode
+# time_embed_dim: 24 
+# sinusodial_dim: 96 
+# num_check_points: 4
+
+data: 
+  id: "Ankursingh/openwebtext_10K" 
+  cache_dir: "/content/cache"
+  tokenizer: "NousResearch/Llama-2-7b-hf"
+  stream: false
+
+model:
+  type: llama
+  hidden_dim: 576
+  intermediate_dim: 2304
+  num_heads: 12  
+  num_layers: 12  
+  seq_len: 512
+
+trainer:
+  wandb:
+    name: "nano_llama_neuralode"
+    project: "qkvflow"
+    tags: ["ankursingh", "nano", "llama", "neuralode"]
+  
+  mp: p=f32,c=bfloat16
+  per_device_eval_parallelism: 1
+  per_device_parallelism: 1
+  train_batch_size: 12           
+  num_train_steps: 5000 
+  steps_per_eval: 100   
+  
+  tensor_parallel_axes: ["mlp", "heads"]
+  fsdp_axis: "embed"
+  batch_axis: "batch"
+  
+  checkpointer: 
+    save_interval: 45min 
+    keep:
+      - every: 1000
+        until: 5001
+    base_path: "/content/drive/MyDrive/nano_llama_neuralode_checkpoints/"
+
+optimizer:
+  learning_rate: 4E-4 
+  beta2: 0.95
+  weight_decay: 1e-5
+  min_lr_ratio: 0.1
+  epsilon: 1e-8
+
+model_choice: neuralode
+time_embed_dim: 24 
+sinusodial_dim: 96 
+num_check_points: 4

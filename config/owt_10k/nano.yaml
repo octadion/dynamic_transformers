@@ -92,7 +92,7 @@ optimizer:
   min_lr_ratio: 0.1
   epsilon: 1e-8
 
-model_choice: neuralode
+model_choice: llamaode
 time_embed_dim: 24 
 sinusodial_dim: 96 
 num_check_points: 4

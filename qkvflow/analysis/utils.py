@@ -5,6 +5,7 @@ from levanter.models.gpt2 import Gpt2LMHeadModel
 from levanter.trainer import Trainer
 
 from qkvflow.nn.dynamic import NeuralOdeLMHeadModel
+from qkvflow.nn.adaptive_transformer import AdaptiveNeuralOdeLMHeadModel
 from qkvflow.train_lm import TrainLmConfig
 
 
@@ -47,6 +48,16 @@ def get_model(config: TrainLmConfig):
             time_embed_dim=config.time_embed_dim,
             sinusodial_dim=config.sinusodial_dim,
             multiplier=config.multiplier,
+            key=model_key,
+        )
+    elif config.model_choice == "adaptive_neuralode":
+        num_experts = getattr(config, 'num_experts', 4)
+        model = AdaptiveNeuralOdeLMHeadModel.init(
+            Vocab,
+            config=config.model,
+            time_embed_dim=config.time_embed_dim,
+            sinusodial_dim=config.sinusodial_dim,
+            num_experts=num_experts,
             key=model_key,
         )
     else:

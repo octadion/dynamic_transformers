@@ -1,0 +1,112 @@
+data: 
+  id: "Ankursingh/openwebtext_10K" 
+  cache_dir: "/content/cache"
+  stream: false
+
+model:
+  type: gpt2
+  hidden_dim: 576
+  num_heads: 12  
+  num_layers: 12  
+  seq_len: 512 
+  embed_pdrop: 0.1
+  resid_pdrop: 0.1
+  attn_pdrop: 0.1
+
+trainer:
+  wandb:
+    name: "adaptive_nano_gpt2"
+    project: "qkvflow"
+    tags: ["ankursingh", "nano", "gpt2", "adaptive", "svd"]
+  
+  mp: p=f32,c=bfloat16
+  per_device_eval_parallelism: 1
+  per_device_parallelism: 1
+  train_batch_size: 8     
+  num_train_steps: 5001 
+  steps_per_eval: 100   
+  
+  tensor_parallel_axes: ["mlp", "heads"]
+  fsdp_axis: "embed"
+  batch_axis: "batch"
+  
+  checkpointer: 
+    save_interval: 45min 
+    keep:
+      - every: 1000 
+        until: 5001
+    base_path: "/content/drive/MyDrive/adaptive_nano_gpt2_checkpoints/"
+
+optimizer:
+  learning_rate: 3E-4 
+  weight_decay: 0.08
+  min_lr_ratio: 0.1
+
+model_choice: adaptive_neuralode
+time_embed_dim: 64 
+sinusodial_dim: 32
+num_experts: 4
+
+expert_types: ["general", "math", "code", "reasoning"]
+use_difficulty_adaptation: true
+use_task_prediction: true
+use_expert_loss: true
+expert_loss_weight: 0.1
+diversity_loss_weight: 0.05
+
+# data: 
+#   id: "Ankursingh/openwebtext_10K" 
+#   cache_dir: "/content/cache"
+#   stream: false
+
+# model:
+#   type: gpt2
+#   hidden_dim: 576
+#   num_heads: 12  
+#   num_layers: 8  # Reduced for memory
+#   seq_len: 256   # Reduced for memory
+#   embed_pdrop: 0.1
+#   resid_pdrop: 0.1
+#   attn_pdrop: 0.1
+
+# trainer:
+#   wandb:
+#     name: "adaptive_nano_gpt2"
+#     project: "qkvflow"
+#     tags: ["ankursingh", "nano", "gpt2", "adaptive", "svd"]
+  
+#   mp: p=f32,c=bfloat16
+#   per_device_eval_parallelism: 1
+#   per_device_parallelism: 1
+#   train_batch_size: 4  # Very small for initial testing        
+#   num_train_steps: 1000  # Reduced for testing
+#   steps_per_eval: 50   
+  
+#   tensor_parallel_axes: ["mlp", "heads"]
+#   fsdp_axis: "embed"
+#   batch_axis: "batch"
+  
+#   checkpointer: 
+#     save_interval: 30min 
+#     keep:
+#       - every: 200 
+#         until: 1000
+#     base_path: "/content/drive/MyDrive/adaptive_nano_gpt2_checkpoints/"
+
+# optimizer:
+#   learning_rate: 1E-4  # Conservative for stability    
+#   weight_decay: 0.01
+#   min_lr_ratio: 0.1
+
+# model_choice: adaptive_neuralode
+# time_embed_dim: 32   # Reduced for memory
+# sinusodial_dim: 16   # Reduced for memory
+# num_experts: 2       # Reduced for testing
+
+# # Expert configurations
+# expert_types: ["general", "specialized"]
+# use_difficulty_adaptation: true
+# use_task_prediction: true
+# use_expert_loss: false  # Disable initially for stability
+# expert_loss_weight: 0.05
+# diversity_loss_weight: 0.01

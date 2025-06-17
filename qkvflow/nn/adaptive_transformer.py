@@ -97,16 +97,11 @@ class AdaptiveBlock(eqx.Module):
         task_logits = self.task_predictor(time_embed)
         task_weights = hax.nn.softmax(task_logits, axis="task_types")
 
-        ln_params = self.attn_ln(time_embed, x)
+        normalized_x = hax.nn.layer_norm(x, axis="embed", eps=1e-5)
         
-        mean = x.mean(axis="embed")
-        var = x.var(axis="embed")
+        adaptive_params = self.attn_ln(time_embed, normalized_x)
         
-        mean_broadcasted = mean.add_axis("embed", x.axis_size("embed"))
-        var_broadcasted = var.add_axis("embed", x.axis_size("embed"))
-        normalized_x = (x - mean_broadcasted) / hax.sqrt(var_broadcasted + 1e-5)
-        
-        normalized_x = normalized_x + ln_params
+        normalized_x = normalized_x + adaptive_params * 0.1
         
         attn_output = self.attn(
             time_embed=time_embed,
@@ -116,21 +111,11 @@ class AdaptiveBlock(eqx.Module):
             key=k1,
         )
         attn_output = self.resid_dropout(attn_output, key=k2)
-        
-        # Apply residual connection  
         x = x + attn_output
         
-        ln_params = self.mlp_ln(time_embed, x)
-        
-        mean = x.mean(axis="embed")
-        var = x.var(axis="embed")
-        
-        mean_broadcasted = mean.add_axis("embed", x.axis_size("embed"))
-        var_broadcasted = var.add_axis("embed", x.axis_size("embed"))
-        normalized_x = (x - mean_broadcasted) / hax.sqrt(var_broadcasted + 1e-5)
-        
-        # Apply adaptive scaling and shifting
-        normalized_x = normalized_x + ln_params
+        normalized_x = hax.nn.layer_norm(x, axis="embed", eps=1e-5)
+        adaptive_params = self.mlp_ln(time_embed, normalized_x)
+        normalized_x = normalized_x + adaptive_params * 0.1
         
         ff_output = self.mlp(
             time_embed=time_embed,
@@ -138,8 +123,6 @@ class AdaptiveBlock(eqx.Module):
             key=k3,
         )
         ff_output = self.resid_dropout(ff_output, key=k4)
-        
-        # Apply residual connection
         output = x + ff_output
         
         return output

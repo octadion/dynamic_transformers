@@ -54,6 +54,14 @@ class TemporalSVDLinear(eqx.Module):
         if not isinstance(Out, Sequence):
             Out = (Out,)
         
+        Out_unique = []
+        for i, out_axis in enumerate(Out):
+            if any(in_axis.name == out_axis.name for in_axis in In):
+                Out_unique.append(out_axis.alias(f"{out_axis.name}_out"))
+            else:
+                Out_unique.append(out_axis)
+        Out = tuple(Out_unique)
+        
         total_in = int(jnp.prod(jnp.array([ax.size for ax in In])))
         total_out = int(jnp.prod(jnp.array([ax.size for ax in Out])))
         if svd_rank is None:
@@ -204,7 +212,7 @@ class TemporalSVDLinear(eqx.Module):
         # Process time embedding
         t_embed = self.lin1(time_embed)
         t_embed = hnn.silu(t_embed)
-        t_embed = self.lin2(time_embed)
+        t_embed = self.lin2(t_embed)
         
         # Get expert mixing weights
         expert_logits = self.expert_selector(t_embed)
@@ -246,7 +254,7 @@ class TemporalSVDLinear(eqx.Module):
         """Get the contribution of each expert at a given time point."""
         t_embed = self.lin1(time_embed)
         t_embed = hnn.silu(t_embed)
-        t_embed = self.lin2(time_embed)
+        t_embed = self.lin2(t_embed)
         
         expert_logits = self.expert_selector(t_embed)
         expert_weights = hax.nn.softmax(expert_logits, axis="expert")

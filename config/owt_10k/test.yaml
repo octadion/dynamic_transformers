@@ -1,0 +1,58 @@
+# Minimal configuration for testing adaptive model
+data: 
+  id: "Ankursingh/openwebtext_10K" 
+  cache_dir: "/content/cache"
+  stream: false
+
+model:
+  type: gpt2
+  hidden_dim: 64      # Reduced for testing
+  num_heads: 4        # Reduced for testing  
+  num_layers: 2       # Reduced for testing
+  seq_len: 128        # Reduced for testing
+  embed_pdrop: 0.1
+  resid_pdrop: 0.1
+  attn_pdrop: 0.1
+
+trainer:
+  wandb:
+    name: "adaptive_test_model"
+    project: "qkvflow_test"
+    tags: ["test", "adaptive", "svd", "debug"]
+  
+  mp: p=f32,c=bfloat16
+  per_device_eval_parallelism: 1
+  per_device_parallelism: 1
+  train_batch_size: 2      # Very small for testing    
+  num_train_steps: 10      # Very short for testing
+  steps_per_eval: 5        # Frequent evaluation
+  
+  tensor_parallel_axes: ["mlp", "heads"]
+  fsdp_axis: "embed"
+  batch_axis: "batch"
+  
+  checkpointer: 
+    save_interval: 10min 
+    keep:
+      - every: 5 
+        until: 10
+    base_path: "/content/adaptive_test_checkpoints/"
+
+optimizer:
+  learning_rate: 1E-4      # Conservative learning rate
+  weight_decay: 0.01       # Lower weight decay
+  min_lr_ratio: 0.1
+
+# Adaptive model specific configuration
+model_choice: adaptive_neuralode
+time_embed_dim: 16           # Reduced for testing
+sinusodial_dim: 8            # Reduced for testing
+num_experts: 2               # Reduced for testing
+
+# Expert configurations (simplified for testing)
+expert_types: ["general", "specialized"]
+use_difficulty_adaptation: true
+use_task_prediction: true
+use_expert_loss: false       # Disable initially for stability
+expert_loss_weight: 0.05
+diversity_loss_weight: 0.01

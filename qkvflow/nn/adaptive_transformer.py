@@ -97,10 +97,13 @@ class AdaptiveBlock(eqx.Module):
         task_logits = self.task_predictor(time_embed)
         task_weights = hax.nn.softmax(task_logits, axis="task_types")
 
-        normalized_x = hax.nn.layer_norm(x, axis="embed", eps=1e-5)
+        mean = x.mean(axis="embed")
+        var = x.var(axis="embed")
+   
+        x_centered = x - mean[..., None]
+        normalized_x = x_centered / hax.sqrt(var[..., None] + 1e-5)
         
         adaptive_params = self.attn_ln(time_embed, normalized_x)
-        
         normalized_x = normalized_x + adaptive_params * 0.1
         
         attn_output = self.attn(
@@ -113,7 +116,11 @@ class AdaptiveBlock(eqx.Module):
         attn_output = self.resid_dropout(attn_output, key=k2)
         x = x + attn_output
         
-        normalized_x = hax.nn.layer_norm(x, axis="embed", eps=1e-5)
+        mean = x.mean(axis="embed")
+        var = x.var(axis="embed")
+        x_centered = x - mean[..., None]
+        normalized_x = x_centered / hax.sqrt(var[..., None] + 1e-5)
+        
         adaptive_params = self.mlp_ln(time_embed, normalized_x)
         normalized_x = normalized_x + adaptive_params * 0.1
         

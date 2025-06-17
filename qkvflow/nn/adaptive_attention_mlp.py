@@ -92,7 +92,7 @@ class AdaptiveAttention(eqx.Module):
         attention_type_weights = hax.nn.softmax(attention_type_logits, axis="attention_types")
         
         qkv_out = self.c_attn(time_embed, x).rearrange(
-            (..., "qkv", "heads", "position", "head_size")
+            ("batch", "position", "qkv", "heads", "head_size")
         )
         
         q, k, v = qkv_out.unbind("qkv")

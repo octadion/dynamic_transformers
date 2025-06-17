@@ -96,17 +96,17 @@ class AdaptiveBlock(eqx.Module):
         
         task_logits = self.task_predictor(time_embed)
         task_weights = hax.nn.softmax(task_logits, axis="task_types")
-        
-        # Adaptive layer norm + attention
-        # The TemporalSVDLinear here acts as adaptive scaling/shifting for layer norm
+
         ln_params = self.attn_ln(time_embed, x)
         
-        mean = x.mean(axis="embed", keepdims=True)
-        var = x.var(axis="embed", keepdims=True)
-        normalized_x = (x - mean) / hax.sqrt(var + 1e-5)
+        mean = x.mean(axis="embed")
+        var = x.var(axis="embed")
         
-        # Apply adaptive scaling and shifting
-        normalized_x = normalized_x + ln_params  # Residual connection with adaptive component
+        mean_broadcasted = mean.add_axis("embed", x.axis_size("embed"))
+        var_broadcasted = var.add_axis("embed", x.axis_size("embed"))
+        normalized_x = (x - mean_broadcasted) / hax.sqrt(var_broadcasted + 1e-5)
+        
+        normalized_x = normalized_x + ln_params
         
         attn_output = self.attn(
             time_embed=time_embed,
@@ -120,16 +120,17 @@ class AdaptiveBlock(eqx.Module):
         # Apply residual connection  
         x = x + attn_output
         
-        # Adaptive layer norm + MLP
         ln_params = self.mlp_ln(time_embed, x)
         
-        # Apply proper layer normalization with adaptive parameters
-        mean = x.mean(axis="embed", keepdims=True)
-        var = x.var(axis="embed", keepdims=True)
-        normalized_x = (x - mean) / hax.sqrt(var + 1e-5)
+        mean = x.mean(axis="embed")
+        var = x.var(axis="embed")
+        
+        mean_broadcasted = mean.add_axis("embed", x.axis_size("embed"))
+        var_broadcasted = var.add_axis("embed", x.axis_size("embed"))
+        normalized_x = (x - mean_broadcasted) / hax.sqrt(var_broadcasted + 1e-5)
         
         # Apply adaptive scaling and shifting
-        normalized_x = normalized_x + ln_params  # Residual connection with adaptive component
+        normalized_x = normalized_x + ln_params
         
         ff_output = self.mlp(
             time_embed=time_embed,

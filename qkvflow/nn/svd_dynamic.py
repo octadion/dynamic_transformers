@@ -16,6 +16,8 @@ from haliax.jax_utils import maybe_rng_split
 
 from levanter.models.gpt2 import Gpt2Config, Gpt2Embeddings
 from qkvflow.nn.time_embed import SinusoidalPosEmb
+from qkvflow.nn.svd_neural_ode_block import SVDNeuralODETransformer
+from qkvflow.optimization.svd_ode_optimizer import SVDODEPolicy
 
 
 class SVDNeuralODELMHeadModel(eqx.Module):
@@ -26,11 +28,13 @@ class SVDNeuralODELMHeadModel(eqx.Module):
     
     transformer: SVDNeuralODETransformer
     embeddings: Gpt2Embeddings
-    policy: Optional[SVDODEPolicy] = None
     
-    # Training configuration
+    # Training configuration (static fields first)
     config: Dict[str, Any] = eqx.field(static=True)
     use_adaptive_mixing: bool = eqx.field(static=True)
+    
+    # Optional policy (with default value last)
+    policy: Optional[SVDODEPolicy] = None
     
     @property
     def model_config(self):

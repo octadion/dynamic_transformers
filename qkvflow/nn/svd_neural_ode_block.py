@@ -16,6 +16,7 @@ from haliax.jax_utils import maybe_rng_split, named_call
 from levanter.models.gpt2 import ACT2FN, dot_product_attention, Gpt2Config
 
 from qkvflow.nn.time_embed import SinusoidalPosEmb, AlternativeTimeEmbeding
+from qkvflow.nn.svd_temporal_linear import SVDTemporalLinear
 
 
 class SVDAttention(eqx.Module):

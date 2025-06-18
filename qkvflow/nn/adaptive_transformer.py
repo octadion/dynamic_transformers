@@ -13,21 +13,21 @@ from haliax.jax_utils import maybe_rng_split, named_call
 from levanter.models.gpt2 import Gpt2Config, Gpt2Embeddings
 
 from .temporal_svd_linear import TemporalSVDLinear
-from .adaptive_attention_mlp import AdaptiveAttention, AdaptiveMLP, SimpleLayerNorm
+from .adaptive_attention_mlp import AdaptiveAttention, AdaptiveMLP
 from qkvflow.nn.time_embed import SinusoidalPosEmb
 
 
 class AdaptiveBlock(eqx.Module):
     """
-    Adaptive transformer block
+    Adaptive transformer block combining temporal dynamics with expert specialization.
     """
     
     config: Gpt2Config = eqx.field(static=True)
 
-    attn_ln: SimpleLayerNorm
-    attn: AdaptiveAttention
-    mlp_ln: SimpleLayerNorm
-    mlp: AdaptiveMLP
+    attn_ln: TemporalSVDLinear  # Adaptive layer norm
+    attn: AdaptiveAttention      # Adaptive attention
+    mlp_ln: TemporalSVDLinear   # Adaptive layer norm  
+    mlp: AdaptiveMLP            # Adaptive MLP
     resid_dropout: hnn.Dropout
     
     task_predictor: hnn.Linear
@@ -43,20 +43,26 @@ class AdaptiveBlock(eqx.Module):
     ):
         k_attn_ln, k_attn, k_mlp_ln, k_mlp, k_task = jrandom.split(key, 5)
         
-        attn_ln = SimpleLayerNorm.init(
-            axis=config.Embed,
-            eps=config.layer_norm_epsilon,
-            use_weight=config.use_bias,
-            use_bias=config.use_bias,
+        attn_ln = TemporalSVDLinear.init(
+            SinusodialDim=SinusodialDim,
+            TembedDim=TembedDim,
+            In=config.Embed,
+            Out=config.Embed,
+            num_experts=num_experts,
+            svd_rank=min(config.Embed.size // 4, 64),
             key=k_attn_ln,
+            use_bias=config.use_bias,
         )
         
-        mlp_ln = SimpleLayerNorm.init(
-            axis=config.Embed,
-            eps=config.layer_norm_epsilon,
-            use_weight=config.use_bias,
-            use_bias=config.use_bias,
+        mlp_ln = TemporalSVDLinear.init(
+            SinusodialDim=SinusodialDim,
+            TembedDim=TembedDim,
+            In=config.Embed,
+            Out=config.Embed,
+            num_experts=num_experts,
+            svd_rank=min(config.Embed.size // 4, 64),
             key=k_mlp_ln,
+            use_bias=config.use_bias,
         )
         
         # Adaptive attention and MLP
@@ -68,7 +74,7 @@ class AdaptiveBlock(eqx.Module):
         )
         
         # Task type predictor
-        TaskTypes = hax.Axis("task_types", 8)
+        TaskTypes = hax.Axis("task_types", 8)  # math, code, reasoning, text, etc.
         task_predictor = hnn.Linear.init(
             In=TembedDim, Out=TaskTypes, key=k_task, use_bias=True
         )
@@ -88,65 +94,76 @@ class AdaptiveBlock(eqx.Module):
     def __call__(self, time_embed: NamedArray, x: NamedArray, mask, layer_idx, *, key):
         k1, k2, k3, k4 = maybe_rng_split(key, 4)
         
-        try:
-            # Task prediction
-            task_logits = self.task_predictor(time_embed)
-            task_weights = hax.nn.softmax(task_logits, axis="task_types")
-            
-            # Attention path with robust layer norm
-            attn_input = self.attn_ln(x)
-            attn_output = self.attn(
-                time_embed=time_embed,
-                x=attn_input,
-                mask=mask,
-                layer_idx=layer_idx,
-                key=k1,
-            )
-            attn_output = self.resid_dropout(attn_output, key=k2)
-            x = x + attn_output
-            
-            # MLP path with robust layer norm  
-            mlp_input = self.mlp_ln(x)
-            ff_output = self.mlp(
-                time_embed=time_embed,
-                x=mlp_input,
-                key=k3,
-            )
-            ff_output = self.resid_dropout(ff_output, key=k4)
-            output = x + ff_output
-            
-            return output
-            
-        except Exception as e:
-            print(f"AdaptiveBlock failed: {e}, using residual connection only")
-            # Fallback: just return input with some noise to prevent gradient issues
-            noise = hax.random.normal(k1, x.axes, dtype=x.dtype) * 1e-6
-            return x + noise
+        task_logits = self.task_predictor(time_embed)
+        task_weights = hax.nn.softmax(task_logits, axis="task_types")
+        
+        # Adaptive layer norm + attention
+        # The TemporalSVDLinear here acts as adaptive scaling/shifting for layer norm
+        ln_params = self.attn_ln(time_embed, x)
+        
+        mean = x.mean(axis="embed", keepdims=True)
+        var = x.var(axis="embed", keepdims=True)
+        normalized_x = (x - mean) / hax.sqrt(var + 1e-5)
+        
+        # Apply adaptive scaling and shifting
+        normalized_x = normalized_x + ln_params  # Residual connection with adaptive component
+        
+        attn_output = self.attn(
+            time_embed=time_embed,
+            x=normalized_x,
+            mask=mask,
+            layer_idx=layer_idx,
+            key=k1,
+        )
+        attn_output = self.resid_dropout(attn_output, key=k2)
+        
+        # Apply residual connection  
+        x = x + attn_output
+        
+        # Adaptive layer norm + MLP
+        ln_params = self.mlp_ln(time_embed, x)
+        
+        # Apply proper layer normalization with adaptive parameters
+        mean = x.mean(axis="embed", keepdims=True)
+        var = x.var(axis="embed", keepdims=True)
+        normalized_x = (x - mean) / hax.sqrt(var + 1e-5)
+        
+        # Apply adaptive scaling and shifting
+        normalized_x = normalized_x + ln_params  # Residual connection with adaptive component
+        
+        ff_output = self.mlp(
+            time_embed=time_embed,
+            x=normalized_x,
+            key=k3,
+        )
+        ff_output = self.resid_dropout(ff_output, key=k4)
+        
+        # Apply residual connection
+        output = x + ff_output
+        
+        return output
     
     def evaluate_at(self, time_embed: NamedArray):
         """Evaluate block at specific time point."""
-        try:
-            attn = self.attn.evaluate_at(time_embed)
-            mlp = self.mlp.evaluate_at(time_embed)
-            
-            # Create a standard block for evaluation
-            from qkvflow.nn.dynamic import _Block
-            return _Block(
-                attn_ln=self.attn_ln,
-                attn=attn,
-                mlp_ln=self.mlp_ln,
-                mlp=mlp,
-                resid_dropout=self.resid_dropout,
-            )
-        except Exception as e:
-            print(f"AdaptiveBlock evaluate_at failed: {e}")
-            # Return identity block
-            return lambda x, mask, layer_idx, key: x
+        attn_ln = self.attn_ln.evaluate_at(time_embed)
+        attn = self.attn.evaluate_at(time_embed)
+        mlp_ln = self.mlp_ln.evaluate_at(time_embed)
+        mlp = self.mlp.evaluate_at(time_embed)
+        
+        # Create a standard block for evaluation
+        from qkvflow.nn.dynamic import _Block
+        return _Block(
+            attn_ln=attn_ln,
+            attn=attn,
+            mlp_ln=mlp_ln,
+            mlp=mlp,
+            resid_dropout=self.resid_dropout,
+        )
 
 
 class AdaptiveNeuralOdeTransformer(eqx.Module):
     """
-    Adaptive Neural ODE Transformer - FIXED VERSION
+    Adaptive Neural ODE Transformer that combines continuous depth with expert specialization.
     """
     
     config: Gpt2Config = eqx.field(static=True)
@@ -155,7 +172,7 @@ class AdaptiveNeuralOdeTransformer(eqx.Module):
     ln_f: hnn.LayerNorm
     
     # Adaptive control
-    difficulty_predictor: hnn.Linear
+    difficulty_predictor: hnn.Linear  # Predicts problem difficulty for depth control
     dt: float = eqx.field(static=True)
     
     @staticmethod
@@ -187,7 +204,7 @@ class AdaptiveNeuralOdeTransformer(eqx.Module):
         )
         
         # Difficulty predictor for adaptive depth
-        DifficultyLevels = hax.Axis("difficulty", 5)
+        DifficultyLevels = hax.Axis("difficulty", 5)  # very_easy to very_hard
         difficulty_predictor = hnn.Linear.init(
             In=TembedDim, Out=DifficultyLevels, key=k_diff, use_bias=True
         )
@@ -204,110 +221,80 @@ class AdaptiveNeuralOdeTransformer(eqx.Module):
         )
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
-        try:
-            # Generate time steps
-            t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
-            time_embed = self.time_embedding(t)
-            
-            # Predict difficulty to potentially adjust step size
-            avg_time_embed = hax.mean(time_embed, axis="layers")
-            difficulty_logits = self.difficulty_predictor(avg_time_embed)
-            difficulty_weights = hax.nn.softmax(difficulty_logits, axis="difficulty")
-            
-            # Adjust time steps based on difficulty
-            difficulty_levels = hax.NamedArray(
-                jnp.array([1.0, 0.8, 0.6, 0.4, 0.2]), 
-                axes=(hax.Axis("difficulty", 5),)
-            )
-            difficulty_factor = hax.dot("difficulty", difficulty_weights, difficulty_levels)
-            adaptive_dt = self.dt * difficulty_factor
-            
-            # Create adaptive time steps
-            dts = hax.ones((self.config.Layers,), dtype=x.dtype) * adaptive_dt
-            
-            if key is not None:
-                keys = maybe_rng_split(key, self.config.num_layers)
-            else:
-                keys = None
-            
-            def do_block(x, time_embed, dt, key=None):
-                try:
-                    output = self.block(time_embed, x, attn_mask, None, key=key)
-                    return x + output * dt
-                except Exception as e:
-                    print(f"Block forward failed: {e}")
-                    return x  # Just return input if block fails
-            
-            # Checkpointed computation for memory efficiency
-            do_block = jax.checkpoint(do_block, prevent_cse=False)
-            
-            x = hax.fold(do_block, axis=self.config.Layers)(x, time_embed, dts, key=keys)
-            x = self.ln_f(x)
-            
-            return x
-            
-        except Exception as e:
-            print(f"AdaptiveNeuralOdeTransformer failed: {e}")
-            # Return input with final layer norm only
-            return self.ln_f(x)
+        # Generate time steps
+        t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
+        time_embed = self.time_embedding(t)
+        
+        # Predict difficulty to potentially adjust step size
+        avg_time_embed = time_embed.mean(axis="layers")
+        difficulty_logits = self.difficulty_predictor(avg_time_embed)
+        difficulty_weights = hax.nn.softmax(difficulty_logits, axis="difficulty")
+        
+        # Adjust time steps based on difficulty (harder problems = smaller steps)
+        difficulty_factor = jnp.sum(
+            difficulty_weights.array * jnp.array([1.0, 0.8, 0.6, 0.4, 0.2])
+        )
+        adaptive_dt = self.dt * difficulty_factor
+        dts = hax.ones((self.config.Layers,), dtype=x.dtype) * adaptive_dt
+        
+        if key is not None:
+            keys = maybe_rng_split(key, self.config.num_layers)
+        else:
+            keys = None
+        
+        def do_block(x, time_embed, dt, key=None):
+            output = self.block(time_embed, x, attn_mask, None, key=key)
+            return x + output * dt
+        
+        # Checkpointed computation for memory efficiency
+        do_block = jax.checkpoint(do_block, prevent_cse=False)
+        
+        x = hax.fold(do_block, axis=self.config.Layers)(x, time_embed, dts, key=keys)
+        x = self.ln_f(x)
+        
+        return x
     
     def compute_trajectory(self, x, attn_mask):
         """Compute the full trajectory through the ODE."""
-        try:
-            t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
-            time_embed = self.time_embedding(t)
-            
-            def do_block(x, time_embed):
-                try:
-                    output = self.block(time_embed, x, attn_mask, None, key=None)
-                    ret = x + output * self.dt
-                    return ret, ret
-                except Exception as e:
-                    print(f"Trajectory block failed: {e}")
-                    return x, x
-            
-            do_block = jax.checkpoint(do_block)
-            _, trajectory = hax.scan(do_block, axis=self.config.Layers)(x, time_embed)
-            
-            return trajectory
-            
-        except Exception as e:
-            print(f"compute_trajectory failed: {e}")
-            # Return trajectory of just the input repeated
-            return hax.stack("layers", [x] * self.config.num_layers)
+        t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
+        time_embed = self.time_embedding(t)
+        
+        def do_block(x, time_embed):
+            output = self.block(time_embed, x, attn_mask, None, key=None)
+            ret = x + output * self.dt
+            return ret, ret
+        
+        do_block = jax.checkpoint(do_block)
+        _, trajectory = hax.scan(do_block, axis=self.config.Layers)(x, time_embed)
+        
+        return trajectory
     
     def evaluate_at(self, dt: float):
         """Evaluate at specific step size for discrete inference."""
-        try:
-            dtype = self.ln_f.weight.dtype
-            new_axis = self.config.Layers.resize(int(1.0 / dt))
-            t = (hax.arange(new_axis, dtype=dtype) + 1) * dt
-            dts = hax.ones((new_axis,), dtype=dtype) * dt
-            time_embed: NamedArray = self.time_embedding(t)
-            
-            blocks = []
-            for i in range(time_embed.axis_size("layers")):
-                tb = time_embed.take("layers", i)
-                block = self.block.evaluate_at(tb)
-                blocks.append(block)
-            
-            from qkvflow.nn.dynamic import _NeuralOdeTransformer
-            return _NeuralOdeTransformer(
-                config=self.config, 
-                blocks=blocks, 
-                ln_f=self.ln_f, 
-                dts=np.array(dts.array)
-            )
-            
-        except Exception as e:
-            print(f"evaluate_at failed: {e}")
-            # Return minimal transformer
-            return lambda x, mask, key: self.ln_f(x)
+        dtype = self.ln_f.weight.dtype
+        new_axis = self.config.Layers.resize(int(1.0 / dt))
+        t = (hax.arange(new_axis, dtype=dtype) + 1) * dt
+        dts = hax.ones((new_axis,), dtype=dtype) * dt
+        time_embed: NamedArray = self.time_embedding(t)
+        
+        blocks = []
+        for i in range(time_embed.axis_size("layers")):
+            tb = time_embed.take("layers", i)
+            block = self.block.evaluate_at(tb)
+            blocks.append(block)
+        
+        from qkvflow.nn.dynamic import _NeuralOdeTransformer
+        return _NeuralOdeTransformer(
+            config=self.config, 
+            blocks=blocks, 
+            ln_f=self.ln_f, 
+            dts=np.array(dts.array)
+        )
 
 
 class AdaptiveNeuralOdeLMHeadModel(eqx.Module):
     """
-    Complete language model with adaptive Neural ODE transformer - FIXED VERSION
+    Complete language model with adaptive Neural ODE transformer.
     """
     
     transformer: AdaptiveNeuralOdeTransformer
@@ -352,18 +339,12 @@ class AdaptiveNeuralOdeLMHeadModel(eqx.Module):
     def __call__(
         self, input_ids: NamedArray, attn_mask=None, *, key=None
     ) -> NamedArray:
-        try:
-            k_embed, k_transformer = maybe_rng_split(key, 2)
-            x = self.embeddings.embed(input_ids, key=k_embed)
-            x = self.transformer(x, attn_mask, key=k_transformer)
-            lm_logits = self.embeddings.unembed(x)
-            
-            return lm_logits
-            
-        except Exception as e:
-            print(f"AdaptiveNeuralOdeLMHeadModel forward failed: {e}")
-            # Return zero logits as fallback
-            return hax.zeros((input_ids.axes[0], input_ids.axes[1], self.Vocab))
+        k_embed, k_transformer = maybe_rng_split(key, 2)
+        x = self.embeddings.embed(input_ids, key=k_embed)
+        x = self.transformer(x, attn_mask, key=k_transformer)
+        lm_logits = self.embeddings.unembed(x)
+        
+        return lm_logits
     
     def compute_loss(
         self,
@@ -373,21 +354,17 @@ class AdaptiveNeuralOdeLMHeadModel(eqx.Module):
         reduction: Optional[hax.ReductionFunction] = hax.mean,
         reduction_axis: Optional[hax.AxisSelection] = None,
     ) -> NamedArray:
-        try:
-            logits = self(example.tokens, example.attn_mask, key=key)
-            targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
-            target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
-            return hnn.cross_entropy_loss(
-                logits,
-                self.Vocab,
-                target_y,
-                reduction,
-                reduction_axis=reduction_axis,
-                where=example.loss_mask,
-            )
-        except Exception as e:
-            print(f"compute_loss failed: {e}")
-            return hax.NamedArray(jnp.array(1.0), axes=())
+        logits = self(example.tokens, example.attn_mask, key=key)
+        targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
+        target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
+        return hnn.cross_entropy_loss(
+            logits,
+            self.Vocab,
+            target_y,
+            reduction,
+            reduction_axis=reduction_axis,
+            where=example.loss_mask,
+        )
     
     @property
     def vocab_size(self) -> int:
@@ -412,49 +389,30 @@ class AdaptiveNeuralOdeLMHeadModel(eqx.Module):
     
     def get_expert_analysis(self, input_ids: NamedArray, attn_mask=None, *, key=None):
         """Analyze expert contributions and task predictions."""
-        try:
-            k_embed, k_transformer = maybe_rng_split(key, 2)
-            x = self.embeddings.embed(input_ids, key=k_embed)
+        k_embed, k_transformer = maybe_rng_split(key, 2)
+        x = self.embeddings.embed(input_ids, key=k_embed)
+        
+        # Get time embeddings
+        t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.transformer.dt
+        time_embed = self.transformer.time_embedding(t)
+        
+        analysis = {}
+        
+        # Analyze expert contributions over time
+        for layer_idx in range(self.config.num_layers):
+            te = time_embed.take("layers", layer_idx)
             
-            # Get time embeddings
-            t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.transformer.dt
-            time_embed = self.transformer.time_embedding(t)
+            # Get attention expert contributions
+            attn_contribs = self.transformer.block.attn.c_attn.get_expert_contributions(te)
+            analysis[f"layer_{layer_idx}_attn_experts"] = attn_contribs
             
-            analysis = {}
+            # Get MLP expert contributions  
+            mlp_contribs = self.transformer.block.mlp.c_fc.get_expert_contributions(te)
+            analysis[f"layer_{layer_idx}_mlp_experts"] = mlp_contribs
             
-            # Analyze expert contributions over time
-            for layer_idx in range(self.config.num_layers):
-                te = time_embed.take("layers", layer_idx)
-                
-                try:
-                    # Get attention expert contributions
-                    attn_contribs = self.transformer.block.attn.c_attn.get_expert_contributions(te)
-                    analysis[f"layer_{layer_idx}_attn_experts"] = attn_contribs
-                    
-                    # Get MLP expert contributions
-                    mlp_contribs = self.transformer.block.mlp.c_fc.get_expert_contributions(te)
-                    analysis[f"layer_{layer_idx}_mlp_experts"] = mlp_contribs
-                    
-                    # Get task predictions
-                    task_logits = self.transformer.block.task_predictor(te)
-                    task_probs = hax.nn.softmax(task_logits, axis="task_types")
-                    analysis[f"layer_{layer_idx}_task_probs"] = task_probs
-                    
-                except Exception as e:
-                    print(f"Expert analysis failed for layer {layer_idx}: {e}")
-                    # Provide dummy analysis
-                    analysis[f"layer_{layer_idx}_attn_experts"] = {
-                        "expert_weights": hax.zeros((hax.Axis("expert", 4),)),
-                        "svd_modulation": hax.zeros((hax.Axis("expert", 4), hax.Axis("svd_rank", 16))),
-                    }
-                    analysis[f"layer_{layer_idx}_mlp_experts"] = {
-                        "expert_weights": hax.zeros((hax.Axis("expert", 4),)),
-                        "svd_modulation": hax.zeros((hax.Axis("expert", 4), hax.Axis("svd_rank", 16))),
-                    }
-                    analysis[f"layer_{layer_idx}_task_probs"] = hax.zeros((hax.Axis("task_types", 8),))
-            
-            return analysis
-            
-        except Exception as e:
-            print(f"get_expert_analysis completely failed: {e}")
-            return {}
+            # Get task predictions
+            task_logits = self.transformer.block.task_predictor(te)
+            task_probs = hax.nn.softmax(task_logits, axis="task_types")
+            analysis[f"layer_{layer_idx}_task_probs"] = task_probs
+        
+        return analysis

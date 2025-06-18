@@ -12,15 +12,17 @@ from haliax import Axis, AxisSpec, NamedArray
 
 class TemporalSVDLinear(eqx.Module):
     """
-    Time-dependent SVD weights implementation with proper error handling.
+    Time-dependent SVD weights implementation combining Neural ODE with Transformer Squared concepts.
+    
+    Based on the SVD decomposition approach from self-adaptive-llms repo.
     """
 
     lin1: hnn.Linear
     lin2: hnn.Linear
     
-    expert_U: NamedArray  
-    expert_S: NamedArray  
-    expert_V: NamedArray  
+    expert_U: NamedArray  # Shape: (num_experts, *In, svd_rank)
+    expert_S: NamedArray  # Shape: (num_experts, svd_rank)  
+    expert_V: NamedArray  # Shape: (num_experts, svd_rank, *Out)
     
     expert_selector: hnn.Linear
     svd_modulator: hnn.Linear
@@ -73,49 +75,39 @@ class TemporalSVDLinear(eqx.Module):
         lin1 = hnn.Linear.init(SinusodialDim, TembedDim_alias, key=k_lin1)
         lin2 = hnn.Linear.init(TembedDim_alias, TembedDim, key=k_lin2)
         
-        # Expert selector
+        # Expert selector (outputs mixing weights)
         expert_selector = hnn.Linear.init(
             TembedDim, ExpertAxis, key=k_expert, use_bias=True
         )
         
-        # SVD modulator
+        # SVD modulator (modulates singular values)
         svd_modulator = hnn.Linear.init(
             TembedDim, (ExpertAxis, SVDRank), key=k_modulator, use_bias=True
         )
         
-        # Initialize SVD components for each expert
-        expert_keys = jrandom.split(k_svd, num_experts)
+        full_weight_key = jrandom.split(k_svd, num_experts)
         
         expert_U_list = []
         expert_S_list = []
         expert_V_list = []
         
-        for expert_key in expert_keys:
+        for i, expert_key in enumerate(full_weight_key):
             full_weight = hax.random.normal(
                 expert_key, shape=In + Out, dtype=jnp.float32
-            ) * jnp.sqrt(2.0 / (total_in + total_out))
+            ) * jnp.sqrt(2.0 / (total_in + total_out))  # Xavier initialization
             
             # Reshape for SVD
             weight_2d = full_weight.array.reshape(total_in, total_out)
             
-            try:
-                U_full, S_full, Vt_full = jnp.linalg.svd(weight_2d, full_matrices=False)
-            except Exception as e:
-                print(f"SVD failed, using random initialization: {e}")
-                U_full = jax.random.normal(expert_key, (total_in, min(total_in, total_out)))
-                S_full = jnp.ones(min(total_in, total_out))
-                Vt_full = jax.random.normal(expert_key, (min(total_in, total_out), total_out))
-                
-                U_full, _ = jnp.linalg.qr(U_full)
-                Vt_full, _ = jnp.linalg.qr(Vt_full.T)
-                Vt_full = Vt_full.T
+            # Perform SVD
+            U_full, S_full, Vt_full = jnp.linalg.svd(weight_2d, full_matrices=False)
             
             # Take top svd_rank components
-            U_truncated = U_full[:, :svd_rank]
-            S_truncated = S_full[:svd_rank]
-            V_truncated = Vt_full[:svd_rank, :].T
+            U_truncated = U_full[:, :svd_rank]  # (total_in, svd_rank)
+            S_truncated = S_full[:svd_rank]     # (svd_rank,)
+            V_truncated = Vt_full[:svd_rank, :].T  # (total_out, svd_rank)
             
-            # Reshape back to haliax NamedArrays
+            # Reshape back to original dimensions
             U_shaped = hax.NamedArray(
                 U_truncated.reshape(*(ax.size for ax in In), svd_rank),
                 axes=In + (SVDRank,)
@@ -136,7 +128,10 @@ class TemporalSVDLinear(eqx.Module):
         expert_V = hax.stack("expert", expert_V_list)
         
         # Optional bias
-        f_b = hax.zeros(shape=(TembedDim,) + Out) if use_bias else None
+        if use_bias:
+            f_b = hax.zeros(shape=(TembedDim,) + Out)
+        else:
+            f_b = None
         
         return TemporalSVDLinear(
             lin1=lin1,
@@ -161,138 +156,113 @@ class TemporalSVDLinear(eqx.Module):
         *,
         key=None,
     ):
-        try:
-            # Process time embedding
-            t_embed = self.lin1(time_embed)
-            t_embed = hnn.silu(t_embed)
-            t_embed = self.lin2(t_embed)
+        # Process time embedding (MLP block from neural ODE)
+        t_embed = self.lin1(time_embed)
+        t_embed = hnn.silu(t_embed)
+        t_embed = self.lin2(t_embed)
+        
+        # Get expert mixing weights (softmax over experts)
+        expert_logits = self.expert_selector(t_embed)
+        expert_weights = hax.nn.softmax(expert_logits, axis="expert")
+        
+        # Get SVD modulation factors (sigmoid to keep positive)
+        svd_modulation = self.svd_modulator(t_embed)
+        svd_modulation = hnn.sigmoid(svd_modulation) + 0.1
+        
+        # Compose mixed weight matrix from experts
+        mixed_weight = None
+        
+        for i in range(self.num_experts):
+            U_i = self.expert_U.take("expert", i)  # (*In, svd_rank)
+            S_i = self.expert_S.take("expert", i)  # (svd_rank,)
+            V_i = self.expert_V.take("expert", i)  # (svd_rank, *Out)
+
+            expert_weight = expert_weights.take("expert", i)
+            expert_modulation = svd_modulation.take("expert", i)  # (svd_rank,)
             
-            # Get expert mixing weights
-            expert_logits = self.expert_selector(t_embed)
-            expert_weights = hax.nn.softmax(expert_logits, axis="expert")
+            modulated_S = S_i * expert_modulation
             
-            # Get SVD modulation factors
-            svd_modulation = self.svd_modulator(t_embed)
-            svd_modulation = hnn.sigmoid(svd_modulation) + 0.1
+            # Reconstruct weight matrix: U @ diag(S) @ V
+            # U: (*In, svd_rank), modulated_S: (svd_rank,), V: (svd_rank, *Out)
+            US = U_i * modulated_S  # Broadcast multiply
+            weight_contrib = US.dot("svd_rank", V_i)  # Result: (*In, *Out)
             
-            # Compose mixed weight matrix from experts - FIXED VERSION
-            output = None
+            # Weight by expert mixing coefficient
+            weighted_contrib = weight_contrib * expert_weight
             
-            for i in range(self.num_experts):
-                # Get expert components
-                U_i = self.expert_U.take("expert", i)  # (In..., svd_rank)
-                S_i = self.expert_S.take("expert", i)  # (svd_rank,)
-                V_i = self.expert_V.take("expert", i)  # (svd_rank, Out...)
-                
-                # Get weights for this expert
-                expert_weight = expert_weights.take("expert", i)  # scalar
-                expert_modulation = svd_modulation.take("expert", i)  # (svd_rank,)
-                
-                # Modulate singular values
-                modulated_S = S_i * expert_modulation  # (svd_rank,)
-                
-                # Compute expert contribution: U @ diag(modulated_S) @ V
-                # First: U * modulated_S (broadcast along svd_rank axis)
-                US = U_i * hax.broadcast_to(modulated_S, U_i.axes)  # (In..., svd_rank)
-                
-                # Then: (U * S) @ V
-                expert_weight_matrix = hax.dot("svd_rank", US, V_i)  # (In..., Out...)
-                
-                # Weight by expert contribution
-                weighted_contribution = expert_weight_matrix * expert_weight
-                
-                if output is None:
-                    output = weighted_contribution
-                else:
-                    output = output + weighted_contribution
-            
-            # Apply to input
-            result = hax.dot(self.In, x, output)
-            result = hax.auto_sharded(result)
-            
-            # Add bias if present
-            if self.f_b is not None:
-                bias = hax.dot(self.TembedDim, t_embed, self.f_b)
-                result = result + bias
-                result = hax.auto_sharded(result)
-            
-            return result
-            
-        except Exception as e:
-            print(f"TemporalSVDLinear forward failed: {e}")
-            # Fallback to simple linear transformation
-            return hax.zeros(x.axes[:-len(self.In)] + self.Out)
+            if mixed_weight is None:
+                mixed_weight = weighted_contrib
+            else:
+                mixed_weight = mixed_weight + weighted_contrib
+        
+        # Apply mixed weight to input
+        output = x.dot(self.In, mixed_weight)
+        output = hax.auto_sharded(output)
+        
+        # Add bias if present
+        if self.f_b is not None:
+            bias = t_embed.dot(self.TembedDim, self.f_b)
+            output = output + bias
+            output = hax.auto_sharded(output)
+        
+        return output
 
     def evaluate_at(self, time_embed: NamedArray):
         """Evaluate the layer at a specific time point to get static weights."""
-        try:
-            # Process time embedding
-            t_embed = self.lin1(time_embed)
-            t_embed = hnn.silu(t_embed)
-            t_embed = self.lin2(t_embed)
-            
-            # Get expert mixing weights
-            expert_logits = self.expert_selector(t_embed)
-            expert_weights = hax.nn.softmax(expert_logits, axis="expert")
-            
-            # Get SVD modulation factors
-            svd_modulation = self.svd_modulator(t_embed)
-            svd_modulation = hnn.sigmoid(svd_modulation) + 0.1
-            
-            # Compose final weight matrix
-            mixed_weight = None
-            
-            for i in range(self.num_experts):
-                U_i = self.expert_U.take("expert", i)
-                S_i = self.expert_S.take("expert", i)
-                V_i = self.expert_V.take("expert", i)
-                
-                expert_weight = expert_weights.take("expert", i)
-                expert_modulation = svd_modulation.take("expert", i)
-                
-                modulated_S = S_i * expert_modulation
-                US = U_i * hax.broadcast_to(modulated_S, U_i.axes)
-                weight_contrib = hax.dot("svd_rank", US, V_i)
-                weighted_contrib = weight_contrib * expert_weight
-                
-                if mixed_weight is None:
-                    mixed_weight = weighted_contrib
-                else:
-                    mixed_weight = mixed_weight + weighted_contrib
-            
-            # Compute bias
-            bias = None
-            if self.f_b is not None:
-                bias = hax.dot(self.TembedDim, t_embed, self.f_b)
-            
-            return hnn.Linear(weight=mixed_weight, bias=bias, In=self.In, Out=self.Out)
+        # Process time embedding
+        t_embed = self.lin1(time_embed)
+        t_embed = hnn.silu(t_embed)
+        t_embed = self.lin2(t_embed)
         
-        except Exception as e:
-            print(f"TemporalSVDLinear evaluate_at failed: {e}")
-            # Return identity-like transformation
-            weight = hax.zeros(self.In + self.Out)
-            return hnn.Linear(weight=weight, bias=None, In=self.In, Out=self.Out)
+        # Get expert mixing weights
+        expert_logits = self.expert_selector(t_embed)
+        expert_weights = hax.nn.softmax(expert_logits, axis="expert")
+        
+        # Get SVD modulation factors
+        svd_modulation = self.svd_modulator(t_embed)
+        svd_modulation = hnn.sigmoid(svd_modulation) + 0.1
+        
+        # Compose final weight matrix
+        mixed_weight = None
+        
+        for i in range(self.num_experts):
+            U_i = self.expert_U.take("expert", i)
+            S_i = self.expert_S.take("expert", i)
+            V_i = self.expert_V.take("expert", i)
+            
+            expert_weight = expert_weights.take("expert", i)
+            expert_modulation = svd_modulation.take("expert", i)
+            
+            modulated_S = S_i * expert_modulation
+            US = U_i * modulated_S
+            weight_contrib = US.dot("svd_rank", V_i)
+            weighted_contrib = weight_contrib * expert_weight
+            
+            if mixed_weight is None:
+                mixed_weight = weighted_contrib
+            else:
+                mixed_weight = mixed_weight + weighted_contrib
+        
+        # Compute bias
+        bias = None
+        if self.f_b is not None:
+            bias = t_embed.dot(self.TembedDim, self.f_b)
+        
+        return hnn.Linear(weight=mixed_weight, bias=bias, In=self.In, Out=self.Out)
 
     def get_expert_contributions(self, time_embed: NamedArray):
         """Get the contribution of each expert at a given time point."""
-        try:
-            t_embed = self.lin1(time_embed)
-            t_embed = hnn.silu(t_embed)
-            t_embed = self.lin2(t_embed)
-            
-            expert_logits = self.expert_selector(t_embed)
-            expert_weights = hax.nn.softmax(expert_logits, axis="expert")
-            
-            svd_modulation = self.svd_modulator(t_embed)
-            svd_modulation = hnn.sigmoid(svd_modulation) + 0.1
-            
-            return {
-                "expert_weights": expert_weights,
-                "svd_modulation": svd_modulation,
-            }
-        except Exception as e:
-            print(f"get_expert_contributions failed: {e}")
-            return {
-                "expert_weights": hax.zeros((hax.Axis("expert", self.num_experts),)),
-                "svd_modulation": hax.zeros((hax.Axis("expert", self.num_experts), hax.Axis("svd_rank", self.svd_rank))),
-            }
+        t_embed = self.lin1(time_embed)
+        t_embed = hnn.silu(t_embed)
+        t_embed = self.lin2(t_embed)
+        
+        expert_logits = self.expert_selector(t_embed)
+        expert_weights = hax.nn.softmax(expert_logits, axis="expert")
+        
+        svd_modulation = self.svd_modulator(t_embed)
+        svd_modulation = hnn.sigmoid(svd_modulation) + 0.1
+        
+        return {
+            "expert_weights": expert_weights,
+            "svd_modulation": svd_modulation,
+        }

@@ -32,6 +32,14 @@ import wandb
 from qkvflow.nn.dynamic import NeuralOdeLMHeadModel
 from qkvflow.nn.dynamic_llama import LlamaLMHeadModel as LlamaODELMHeadModel
 
+try:
+    from qkvflow.nn.svd_dynamic import SVDNeuralODELMHeadModel
+    from qkvflow.optimization.svd_ode_optimizer import SVDODEReinforce, SVDODETrainer
+    SVD_AVAILABLE = True
+except ImportError as e:
+    print(f"SVD Neural ODE not available: {e}")
+    SVD_AVAILABLE = False
+
 
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_enable_triton_softmax_fusion=true "
@@ -146,6 +154,24 @@ class OptimizerConfigWithWeightDecay(OptimizerConfig):
             return mask_fn
 
 
+@dataclass 
+class SVDODEConfig:
+    """Configuration for SVD Neural ODE specific parameters"""
+    
+    rank: int = 64
+    num_experts: int = 4
+    expert_init_scale: float = 0.05
+    
+    use_adaptive_mixing: bool = True
+    policy_learning_rate: float = 1e-4
+    entropy_coeff: float = 0.01
+    value_loss_coeff: float = 0.5
+    
+    policy_update_frequency: int = 10
+    warmup_steps: int = 1000
+    expert_diversity_bonus: float = 0.1
+
+
 @dataclass
 class TrainLmConfig:
 
@@ -176,6 +202,44 @@ class TrainLmConfig:
     alpha: float = 1.0
     num_blocks: int = 4
     multiplier: int = 2
+    
+    svd_ode: SVDODEConfig = field(default_factory=SVDODEConfig)
+
+
+def create_svd_compute_loss_function(config: TrainLmConfig):
+    """Create compute loss function for SVD Neural ODE"""
+    
+    def svd_compute_loss(model, example, key=None):
+        if hasattr(model, 'compute_policy_loss') and SVD_AVAILABLE:
+            policy_losses = model.compute_policy_loss(example, key=key)
+            
+            if hasattr(model, '_training_step'):
+                current_step = model._training_step
+            else:
+                current_step = 0
+                
+            if current_step > config.svd_ode.warmup_steps:
+                total_loss = policy_losses["lm_loss"] + policy_losses["policy_loss"]
+            else:
+                total_loss = policy_losses["lm_loss"]
+
+            if current_step % 100 == 0:
+                try:
+                    wandb.log({
+                        "policy_loss": float(policy_losses["policy_loss"]),
+                        "value_loss": float(policy_losses["value_loss"]), 
+                        "entropy": float(policy_losses["entropy"]),
+                        "reward": float(policy_losses["reward"]),
+                        "training_step": current_step,
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to log wandb metrics: {e}")
+            
+            return total_loss
+        else:
+            return model.compute_loss(example, key=key).scalar()
+    
+    return svd_compute_loss
 
 
 def main(config: TrainLmConfig):
@@ -207,25 +271,33 @@ def main(config: TrainLmConfig):
 
     if config.model_choice == "gpt2" or config.model_choice == "llama":
         from dataclasses import replace
-
         new_optimizer = replace(
             config.optimizer,
             weight_decay_modules=r".*attn.*weight|.*mlp.*weight|.*token_embeddings|.*position_embeddings",
-        )  # noqa
+        )
         config = replace(config, optimizer=new_optimizer)
-    elif config.model_choice == "neuralode":
+    elif config.model_choice in ["neuralode", "llamaode"]:
         from dataclasses import replace
-
         new_optimizer = replace(
             config.optimizer,
             weight_decay_modules=r".*time_embedding|.*token_embeddings|.*position_embeddings",
-        )  # noqa
+        )
         config = replace(config, optimizer=new_optimizer)
-    else:
-        pass
+    elif config.model_choice == "svd_neuralode":
+        from dataclasses import replace
+        new_optimizer = replace(
+            config.optimizer,
+            weight_decay_modules=r".*time_embedding|.*token_embeddings|.*position_embeddings|.*svd.*",
+        )
+        config = replace(config, optimizer=new_optimizer)
+        
+        # Use SVD-specific compute loss function
+        if SVD_AVAILABLE:
+            compute_loss = create_svd_compute_loss_function(config)
+        else:
+            logger.warning("SVD Neural ODE not available, falling back to standard loss")
 
     optimizer = config.optimizer.build(config.trainer.num_train_steps)
-
     trainer = Trainer(config.trainer, optimizer, compute_loss)
 
     eval_dataset = CausalLmDataset(
@@ -252,7 +324,6 @@ def main(config: TrainLmConfig):
         if config.model_choice == "gpt2" or config.model_choice == "llama":
             model_init = lambda: config.model.build(Vocab, key=model_key)
         elif config.model_choice == "neuralode":
-
             def model_init():
                 return NeuralOdeLMHeadModel.init(
                     Vocab,
@@ -263,7 +334,6 @@ def main(config: TrainLmConfig):
                 )
 
         elif config.model_choice == "llamaode":
-
             def model_init():
                 return LlamaODELMHeadModel.init(
                     Vocab,
@@ -272,33 +342,124 @@ def main(config: TrainLmConfig):
                     sinusodial_dim=config.sinusodial_dim,
                     key=model_key,
                 )
+        
+        elif config.model_choice == "svd_neuralode":
+            if not SVD_AVAILABLE:
+                raise ValueError("SVD Neural ODE not available. Please install required dependencies.")
+                
+            def model_init():
+                training_config = {
+                    "optimizer_type": "reinforce",
+                    "learning_rate": config.svd_ode.policy_learning_rate,
+                    "entropy_coeff": config.svd_ode.entropy_coeff,
+                    "value_loss_coeff": config.svd_ode.value_loss_coeff,
+                }
+                
+                return SVDNeuralODELMHeadModel.init(
+                    Vocab=Vocab,
+                    config=config.model,
+                    rank=config.svd_ode.rank,
+                    num_experts=config.svd_ode.num_experts,
+                    time_embed_dim=config.time_embed_dim,
+                    sinusodial_dim=config.sinusodial_dim,
+                    use_adaptive_mixing=config.svd_ode.use_adaptive_mixing,
+                    training_config=training_config,
+                    key=model_key,
+                )
 
         else:
             raise ValueError(f"Unknown model_choice {config.model_choice}")
 
         state = trainer.initial_state(
             training_key=train_key,
-            # model_init=model_init,
             model_init=model_init,
         )
 
+        if config.model_choice == "svd_neuralode" and hasattr(state.model, 'policy'):
+            state.model._training_step = 0
+
         wandb.summary["parameter_count"] = parameter_count(state.model)
+        
+        if config.model_choice == "svd_neuralode":
+            wandb.summary["svd_rank"] = config.svd_ode.rank
+            wandb.summary["num_experts"] = config.svd_ode.num_experts
+            wandb.summary["adaptive_mixing"] = config.svd_ode.use_adaptive_mixing
 
         trainer.add_default_hooks(eval_loader)
         trainer.add_hook(
             callbacks.log_performance_stats(Pos.size, trainer.config.train_batch_size),
             every=1,
         )
+        
+        if config.model_choice == "svd_neuralode" and SVD_AVAILABLE:
+            def log_svd_analysis(state):
+                try:
+                    dummy_tokens = jrandom.randint(
+                        jrandom.PRNGKey(42), 
+                        (1, min(64, Pos.size)), 
+                        0, vocab_size
+                    )
+                    dummy_example = type('Example', (), {
+                        'tokens': dummy_tokens,
+                        'attn_mask': None,
+                        'loss_mask': None
+                    })()
+                    
+                    # Analyze expert usage
+                    expert_analysis = state.model.analyze_expert_usage(dummy_example)
+                    
+                    # Log expert diversity
+                    attn_entropy = -jnp.sum(
+                        expert_analysis["attention_experts"].mean(0) * 
+                        jnp.log(expert_analysis["attention_experts"].mean(0) + 1e-8),
+                        axis=1
+                    ).mean()
+                    
+                    mlp_entropy = -jnp.sum(
+                        expert_analysis["mlp_experts"].mean(0) * 
+                        jnp.log(expert_analysis["mlp_experts"].mean(0) + 1e-8),
+                        axis=1
+                    ).mean()
+                    
+                    wandb.log({
+                        "expert_diversity/attention_entropy": float(attn_entropy),
+                        "expert_diversity/mlp_entropy": float(mlp_entropy),
+                        "training_step": state.step,
+                    })
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to log SVD analysis: {e}")
+            
+            trainer.add_hook(log_svd_analysis, every=config.svd_ode.policy_update_frequency)
 
         if state.step > 0:
-
             import tqdm
-
             for _ in tqdm.tqdm(
                 range(state.step + 1),
                 desc="finding where to resume",
             ):
                 next(train_loader)
+
+        if config.model_choice == "svd_neuralode" and SVD_AVAILABLE:
+            logger.info("Starting SVD Neural ODE training with policy optimization")
+            
+            try:
+                svd_optimizer = SVDODEReinforce(
+                    learning_rate=config.svd_ode.policy_learning_rate,
+                    entropy_coeff=config.svd_ode.entropy_coeff,
+                    value_loss_coeff=config.svd_ode.value_loss_coeff,
+                )
+                
+                svd_trainer = SVDODETrainer(
+                    model=state.model,
+                    policy=state.model.policy,
+                    optimizer=svd_optimizer,
+                    config=config.svd_ode.__dict__,
+                )
+                logger.info("SVD trainer initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize SVD trainer: {e}")
+                logger.info("Falling back to standard training")
 
         trainer.train(state, train_loader)
 

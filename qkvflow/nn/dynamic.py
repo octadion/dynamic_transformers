@@ -125,6 +125,20 @@ class TemporalLinear(eqx.Module):
 
         return hnn.Linear(weight=W, bias=b, In=self.In, Out=self.Out)
 
+    def evaluate_at_components(self, time_embed: NamedArray):
+        """Evaluates and returns the temporal weight and bias components without creating a Linear layer."""
+        # MLP block
+        time_embed = self.lin1(time_embed)
+        time_embed = hnn.silu(time_embed)
+        time_embed = self.lin2(time_embed)
+
+        # Projection
+        W = self.f_W(time_embed)
+        b = None
+        if self.f_b is not None:
+            b = time_embed.dot(self.TembedDim, self.f_b)
+        
+        return W, b
 
 class TemporalLayerNorm(eqx.Module):
 

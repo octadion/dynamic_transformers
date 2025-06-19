@@ -216,7 +216,7 @@ class SVDPolicy(eqx.Module):
 class _PolicyNet(eqx.Module):
     layer1: hnn.Linear
     layer2: hnn.Linear
-    act: Callable
+    act: Callable = eqx.field(static=True)
 
     def __call__(self, x: NamedArray) -> NamedArray:
         x = self.layer1(x)

@@ -51,32 +51,15 @@ class LlamaAdaptiveMLP(eqx.Module):
         
         return LlamaAdaptiveMLP(gate_proj=gate_proj, up_proj=up_proj, down_proj=down_proj, act=mlp.act)
     
-    def __call__(self, x: NamedArray, *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
-        """SwiGLU forward pass: gate_proj(x) * act * up_proj(x) -> down_proj."""
+    def __call__(self, x: NamedArray, multipliers: Dict[str, NamedArray], *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
         k1, k2, k3 = maybe_rng_split(key, 3)
         
-        gate = self.gate_proj(x, key=k1)
+        gate = self.gate_proj(x, s_multiplier=multipliers["gate_proj"], key=k1)
         gate = self.act(gate)
-        up = self.up_proj(x, key=k2)
+        up = self.up_proj(x, s_multiplier=multipliers["up_proj"], key=k2)
         hidden = gate * up
-        output = self.down_proj(hidden, key=k3)
+        output = self.down_proj(hidden, s_multiplier=multipliers["down_proj"], key=k3)
         return output
-    
-    def get_multipliers(self) -> Dict[str, NamedArray]:
-        """Get all singular value multipliers."""
-        return {
-            "gate_proj": self.gate_proj.s_multiplier,
-            "up_proj": self.up_proj.s_multiplier,
-            "down_proj": self.down_proj.s_multiplier,
-        }
-
-    def set_multipliers(self, multipliers: Dict[str, NamedArray]) -> "LlamaAdaptiveMLP":
-        """Creates a new LlamaAdaptiveMLP with updated singular value multipliers."""
-        new_gate_proj = eqx.tree_at(lambda m: m.s_multiplier, self.gate_proj, multipliers["gate_proj"])
-        new_up_proj = eqx.tree_at(lambda m: m.s_multiplier, self.up_proj, multipliers["up_proj"])  
-        new_down_proj = eqx.tree_at(lambda m: m.s_multiplier, self.down_proj, multipliers["down_proj"])
-
-        return dataclasses.replace(self, gate_proj=new_gate_proj, up_proj=new_up_proj, down_proj=new_down_proj)
 
 
 class LlamaAdaptiveTemporalMLP(eqx.Module):
@@ -202,7 +185,7 @@ class LlamaAdaptiveBlock(eqx.Module):
         
         return LlamaAdaptiveBlock(config, self_attn, adaptive_temporal_mlp, input_layernorm, post_attention_layernorm)
     
-    def __call__(self, time_embed, x: NamedArray, mask, layer_idx, *, key):
+    def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key):
         k1, k2 = maybe_rng_split(key, 2)
 
         attn_output = self.self_attn(
@@ -213,10 +196,11 @@ class LlamaAdaptiveBlock(eqx.Module):
         )
         
         intermediate_x = x + attn_output
-        
+
         mlp_output = self.mlp(
             time_embed=time_embed,
             x=self.post_attention_layernorm(time_embed, intermediate_x),
+            multipliers=multipliers,
             key=k2,
         )
 
@@ -296,22 +280,15 @@ class SVDLlamaOdeTransformer(eqx.Module):
         keys = maybe_rng_split(key, self.config.num_layers) if key is not None else [None] * self.config.num_layers
 
         def do_block(block_template, x_in, time_embed_in, dt_in, layer_idx_in, key_in):
-            # Set layer-specific multipliers
             layer_multipliers = {
                 "gate_proj": multipliers.get(f"layer_{layer_idx_in}_gate_proj"),
                 "up_proj": multipliers.get(f"layer_{layer_idx_in}_up_proj"),
                 "down_proj": multipliers.get(f"layer_{layer_idx_in}_down_proj"),
             }
             
-            # Apply multipliers if they exist
-            if layer_multipliers.get("gate_proj") is not None:
-                new_mlp = block_template.mlp.set_multipliers(layer_multipliers)
-                current_block = dataclasses.replace(block_template, mlp=new_mlp)
-            else:
-                current_block = block_template
+            current_block = block_template
             
-            # Neural ODE step: x + f(x) * dt
-            output = current_block(time_embed_in, x_in, attn_mask, layer_idx_in, key=key_in)
+            output = current_block(time_embed_in, x_in, attn_mask, layer_idx_in, multipliers=layer_multipliers, key=key_in)
             return x_in + output * dt_in
         
         for i in range(self.config.num_layers):

@@ -15,17 +15,13 @@ from typing import Callable, Dict, Tuple, List, Optional
 
 class SVDLinear(eqx.Module):
     """
-    Linear layer with SVD decomposition and learnable singular value modulation.
-    W = U @ S @ V^T, where S is modulated by learnable parameters.
+    Linear layer with SVD decomposition.
+    W = U @ S @ V^T, where S is modulated by multipliers passed during forward pass.
     """
-
     U: NamedArray
     S_base: NamedArray
     V: NamedArray
     
-    s_multiplier: NamedArray  # Learnable multipliers for singular values
-    
-    # Axes
     In: hax.AxisSpec = eqx.field(static=True)
     Out: hax.AxisSpec = eqx.field(static=True)
     Rank: hax.Axis = eqx.field(static=True)
@@ -83,14 +79,11 @@ class SVDLinear(eqx.Module):
         U = hax.NamedArray(U_arr, axes=v_axes)
         S_base = hax.NamedArray(S_arr, axes=(Rank,))
         V = hax.NamedArray(Vh_arr.T, axes=u_axes)
-   
-        s_multiplier = hax.ones(Rank) + hax.random.normal(key, (Rank,)) * 0.01
         
         return SVDLinear(
             U=U,
             S_base=S_base,
             V=V,
-            s_multiplier=s_multiplier,
             In=linear.In,
             Out=linear.Out,
             Rank=Rank,
@@ -98,20 +91,18 @@ class SVDLinear(eqx.Module):
             bias=linear.bias,
         )
     
-    def get_effective_weight(self) -> NamedArray:
+    def get_effective_weight(self, s_multiplier: NamedArray) -> NamedArray:
         """Reconstruct weight matrix with modulated singular values."""
-        S_effective = self.S_base * self.s_multiplier
+        batch_axis = s_multiplier.axes[0]
+        s_base_broadcasted = self.S_base.broadcast_axis(batch_axis)
+        S_effective = s_base_broadcasted * s_multiplier
         
-        # W = U @ S @ V.T, with U(In, Rank), S(Rank), V(Out, Rank)
-
         US = self.U * S_effective.broadcast_axis(self.In)
-
         W = hax.dot(self.Rank, US, self.V)
-        
         return W
     
-    def __call__(self, x: NamedArray, *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
-        W = self.get_effective_weight()
+    def __call__(self, x: NamedArray, s_multiplier: NamedArray, *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
+        W = self.get_effective_weight(s_multiplier)
         y = hax.dot(self.In, x, W)
         
         if self.use_bias and self.bias is not None:

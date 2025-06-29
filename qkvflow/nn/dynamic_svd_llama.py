@@ -73,9 +73,8 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
     act: Callable = eqx.field(static=True)
     
     @named_call
-    def __call__(self, time_embed: NamedArray, x: NamedArray, *, key=None):
+    def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
         """Forward pass with additive combination of temporal and SVD weights."""
-        k1, k2, k3 = maybe_rng_split(key, 3)
         
         # Get temporal weight and bias components
         w_gate_temporal, b_gate_temporal = self.gate_proj_temporal.evaluate_at_components(time_embed)
@@ -83,11 +82,11 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
         w_down_temporal, b_down_temporal = self.down_proj_temporal.evaluate_at_components(time_embed)
         
         # Get SVD weight and bias components  
-        w_gate_svd = self.adaptive_mlp.gate_proj.get_effective_weight()
+        w_gate_svd = self.adaptive_mlp.gate_proj.get_effective_weight(s_multiplier=multipliers['gate_proj'])
         b_gate_svd = self.adaptive_mlp.gate_proj.bias
-        w_up_svd = self.adaptive_mlp.up_proj.get_effective_weight()
+        w_up_svd = self.adaptive_mlp.up_proj.get_effective_weight(s_multiplier=multipliers['up_proj'])
         b_up_svd = self.adaptive_mlp.up_proj.bias
-        w_down_svd = self.adaptive_mlp.down_proj.get_effective_weight()
+        w_down_svd = self.adaptive_mlp.down_proj.get_effective_weight(s_multiplier=multipliers['down_proj'])
         b_down_svd = self.adaptive_mlp.down_proj.bias
 
         w_gate_eff = w_gate_svd + w_gate_temporal
@@ -125,11 +124,6 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
             output = output + b_down_eff
             
         return output
-    
-    def set_multipliers(self, multipliers: Dict[str, NamedArray]) -> "LlamaAdaptiveTemporalMLP":
-        """Creates a new LlamaAdaptiveTemporalMLP with updated multipliers."""
-        new_adaptive_mlp = self.adaptive_mlp.set_multipliers(multipliers)
-        return dataclasses.replace(self, adaptive_mlp=new_adaptive_mlp)
 
 
 class LlamaAdaptiveBlock(eqx.Module):

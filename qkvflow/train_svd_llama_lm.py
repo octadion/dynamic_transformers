@@ -8,6 +8,7 @@ import jax.random as jrandom
 import jax.numpy as jnp
 import levanter
 import equinox as eqx
+import haliax as hax
 from haliax import Axis
 from haliax.partitioning import round_axis_for_partitioning
 from levanter import callbacks
@@ -232,19 +233,25 @@ def main(config: TrainSVDLlamaLmConfig):
         if config.model_choice == "llamaode-svd":
             def log_multiplier_stats(step_info):
                 if hasattr(step_info.model.transformer, 'policy'):
-                    # Log a sample of SVD multipliers to monitor adaptation
-                    task_vector = jnp.ones((step_info.model.config.Embed.size,))  # Dummy task vector
-                    multipliers = step_info.model.transformer.policy(hax.named(task_vector, step_info.model.config.Embed))
+
+                    task_vector = jnp.ones((step_info.model.config.Embed.size,))
+ 
+                    task_vector_batched = task_vector[None, :] 
+
+                    Batch = hax.Axis("batch", 1)
+                    Embed = step_info.model.config.Embed
+                    named_task_vector = hax.named(task_vector_batched, (Batch, Embed))
                     
-                    # Sample a few layer multipliers to log
+                    multipliers = step_info.model.transformer.policy(named_task_vector)
+                    
                     sample_stats = {}
                     for layer_idx in [0, step_info.model.config.num_layers // 2, step_info.model.config.num_layers - 1]:
                         for proj in ["gate_proj", "up_proj", "down_proj"]:
                             key = f"layer_{layer_idx}_{proj}"
                             if key in multipliers:
-                                mult = multipliers[key]
-                                sample_stats[f"multipliers/{key}/mean"] = float(jnp.mean(mult.array))
-                                sample_stats[f"multipliers/{key}/std"] = float(jnp.std(mult.array))
+                                mult_sample = multipliers[key].take(Batch, 0)
+                                sample_stats[f"multipliers/{key}/mean"] = float(jnp.mean(mult_sample.array))
+                                sample_stats[f"multipliers/{key}/std"] = float(jnp.std(mult_sample.array))
                     
                     if config.trainer.wandb.mode != "offline" and sample_stats:
                         import wandb

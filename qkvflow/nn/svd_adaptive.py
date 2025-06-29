@@ -271,16 +271,27 @@ class DynamicSVDPolicy(eqx.Module):
                 chunk = flat_multipliers_single[current_idx : current_idx + num_elements]
 
                 reshaped_chunk = chunk.reshape([ax.size for ax in shape_info])
-                named_array = hax.named(reshaped_chunk, shape_info)
 
-                output_dict[name] = 1.0 + named_array
+                output_dict[name] = reshaped_chunk
                 
                 current_idx += num_elements
             return output_dict
 
         batched_output_dict = vmap(process_single_example)(batched_flat_multipliers.array)
 
-        return batched_output_dict
+        final_dict = {}
+
+        Batch = task_vector.axes[0] 
+        
+        for name, batched_array in batched_output_dict.items():
+
+            original_axes = self.rank_shapes[name]
+
+            new_axes = (Batch,) + original_axes
+
+            final_dict[name] = hax.named(batched_array, new_axes)
+
+        return final_dict
         
     def get_policy_params(self):
         return {"policy_net": self.policy_net}

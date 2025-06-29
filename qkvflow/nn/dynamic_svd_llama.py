@@ -381,9 +381,8 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
     def __call__(
         self, input_ids: NamedArray, attn_mask=None, *, key=None
     ) -> NamedArray:
-        k_embed, k_transformer = maybe_rng_split(key, 2)
-        x = self.embeddings.embed(input_ids, key=k_embed)
-        x = self.transformer(x, attn_mask, key=k_transformer)
+        x = self.embeddings.embed(input_ids)
+        x = self.transformer(x, attn_mask, key=key)
         lm_logits = self.lm_head(x)
         
         return lm_logits

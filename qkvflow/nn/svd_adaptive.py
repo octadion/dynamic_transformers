@@ -265,28 +265,31 @@ class DynamicSVDPolicy(eqx.Module):
         return DynamicSVDPolicy(policy_net, rank_shapes, param_names)
         
     def __call__(self, task_vector: NamedArray) -> Dict[str, NamedArray]:
-        """Generates multipliers from a task vector."""
         import math
+        from jax import vmap
 
-        batched_flat_multipliers = self.policy_net(task_vector).array
+        batched_flat_multipliers = self.policy_net(task_vector)
 
-        flat_multipliers = batched_flat_multipliers[0]
-        
-        output_dict = {}
-        current_idx = 0
-        for name in self.param_names:
-            shape_info = self.rank_shapes[name]
-            num_elements = math.prod(ax.size for ax in shape_info)
-            
-            chunk = flat_multipliers[current_idx : current_idx + num_elements]
-            reshaped_chunk = chunk.reshape([ax.size for ax in shape_info])
-            named_array = hax.named(reshaped_chunk, shape_info)
+        def process_single_example(flat_multipliers_single):
+            output_dict = {}
+            current_idx = 0
+            for name in self.param_names:
+                shape_info = self.rank_shapes[name]
+                num_elements = math.prod(ax.size for ax in shape_info)
+                
+                chunk = flat_multipliers_single[current_idx : current_idx + num_elements]
 
-            output_dict[name] = 1.0 + named_array
-            
-            current_idx += num_elements
-            
-        return output_dict
+                reshaped_chunk = chunk.reshape([ax.size for ax in shape_info])
+                named_array = hax.named(reshaped_chunk, shape_info)
+
+                output_dict[name] = 1.0 + named_array
+                
+                current_idx += num_elements
+            return output_dict
+
+        batched_output_dict = vmap(process_single_example)(batched_flat_multipliers.array)
+
+        return batched_output_dict
         
     def get_policy_params(self):
         return {"policy_net": self.policy_net}

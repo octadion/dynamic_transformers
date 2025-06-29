@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 from haliax import Axis, NamedArray
+from haliax.jax_utils import maybe_rng_split
 from typing import Callable, Dict, Tuple, List, Optional
 
 
@@ -127,26 +128,13 @@ class AdaptiveMLP(eqx.Module):
         c_proj = SVDLinear.from_linear(mlp.c_proj, rank_ratio, key=k2)
         
         return AdaptiveMLP(c_fc=c_fc, c_proj=c_proj, act=mlp.act)
-    
-    def __call__(self, x: NamedArray, *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
-        x = self.c_fc(x, key=key)
+
+    def __call__(self, x: NamedArray, multipliers: Dict[str, NamedArray], *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
+        k1, k2 = maybe_rng_split(key, 2)
+        x = self.c_fc(x, s_multiplier=multipliers["c_fc"], key=k1)
         x = self.act(x)
-        x = self.c_proj(x, key=key)
+        x = self.c_proj(x, s_multiplier=multipliers["c_proj"], key=k2)
         return x
-    
-    def get_multipliers(self) -> Dict[str, NamedArray]:
-        """Get all singular value multipliers."""
-        return {
-            "c_fc": self.c_fc.s_multiplier,
-            "c_proj": self.c_proj.s_multiplier,
-        }
-
-    def set_multipliers(self, multipliers: Dict[str, NamedArray]) -> "AdaptiveMLP":
-        """Creates a new AdaptiveMLP with updated singular value multipliers."""
-        new_c_fc = eqx.tree_at(lambda m: m.s_multiplier, self.c_fc, multipliers["c_fc"])
-        new_c_proj = eqx.tree_at(lambda m: m.s_multiplier, self.c_proj, multipliers["c_proj"])
-
-        return dataclasses.replace(self, c_fc=new_c_fc, c_proj=new_c_proj)
 
 
 class SVDPolicy(eqx.Module):

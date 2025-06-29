@@ -89,7 +89,7 @@ class AdaptiveBlock(eqx.Module):
         
         return AdaptiveBlock(config, attn_ln, attn, mlp_ln, adaptive_mlp, resid_dropout)
     
-    def __call__(self, time_embed, x: NamedArray, mask, layer_idx, *, key):
+    def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key):
         k1, k2, k3, k4 = maybe_rng_split(key, 4)
         
         attn_output = self.attn(
@@ -104,6 +104,7 @@ class AdaptiveBlock(eqx.Module):
         ff_output = self.mlp(
             time_embed=time_embed,
             x=self.mlp_ln(time_embed, x),
+            multipliers=multipliers,
             key=k3,
         )
         ff_output = self.resid_dropout(ff_output, key=k4)
@@ -119,8 +120,8 @@ class AdaptiveTemporalMLP(eqx.Module):
     act: Callable = eqx.field(static=True)
     
     @named_call
-    def __call__(self, time_embed: NamedArray, x: NamedArray, *, key=None):
-        w_fc_svd = self.adaptive_mlp.c_fc.get_effective_weight()
+    def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
+        w_fc_svd = self.adaptive_mlp.c_fc.get_effective_weight(s_multiplier=multipliers["c_fc"])
         b_fc_svd = self.adaptive_mlp.c_fc.bias
 
         w_fc_temporal, b_fc_temporal = self.c_fc_temporal.evaluate_at_components(time_embed)
@@ -139,7 +140,7 @@ class AdaptiveTemporalMLP(eqx.Module):
 
         x = self.act(x)
 
-        w_proj_svd = self.adaptive_mlp.c_proj.get_effective_weight()
+        w_proj_svd = self.adaptive_mlp.c_proj.get_effective_weight(s_multiplier=multipliers["c_proj"])
         b_proj_svd = self.adaptive_mlp.c_proj.bias
 
         w_proj_temporal, b_proj_temporal = self.c_proj_temporal.evaluate_at_components(time_embed)
@@ -157,11 +158,6 @@ class AdaptiveTemporalMLP(eqx.Module):
             x = x + b_proj_eff
             
         return x
-    
-    def set_multipliers(self, multipliers: Dict[str, NamedArray]) -> "AdaptiveTemporalMLP":
-        """Creates a new AdaptiveTemporalMLP with updated multipliers."""
-        new_adaptive_mlp = self.adaptive_mlp.set_multipliers(multipliers)
-        return dataclasses.replace(self, adaptive_mlp=new_adaptive_mlp)
 
 
 class SVDNeuralOdeTransformer(eqx.Module):
@@ -239,13 +235,9 @@ class SVDNeuralOdeTransformer(eqx.Module):
                 "c_proj": multipliers.get(f"layer_{layer_idx_in}_c_proj"),
             }
             
-            if layer_multipliers.get("c_fc") is not None:
-                new_mlp = block_template.mlp.set_multipliers(layer_multipliers)
-                current_block = dataclasses.replace(block_template, mlp=new_mlp)
-            else:
-                current_block = block_template
+            current_block = block_template
             
-            output = current_block(time_embed_in, x_in, attn_mask, layer_idx_in, key=key_in)
+            output = current_block(time_embed_in, x_in, attn_mask, layer_idx_in, multipliers=layer_multipliers, key=key_in)
             return x_in + output * dt_in
         
         for i in range(self.config.num_layers):

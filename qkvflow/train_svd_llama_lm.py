@@ -81,14 +81,14 @@ def main(config: TrainSVDLlamaLmConfig):
         from dataclasses import replace
         new_optimizer = replace(
             config.optimizer,
-            weight_decay_modules=r".*(U|V)$"
+            weight_decay_modules=r".*\.(weight|U|V)$"
         )
         config = replace(config, optimizer=new_optimizer)
     elif config.model_choice == "neuralode-svd":
         from dataclasses import replace
         new_optimizer = replace(
             config.optimizer,
-            weight_decay_modules=r".*(U|V)$"
+            weight_decay_modules=r".*\.(weight|U|V)$"
         )
         config = replace(config, optimizer=new_optimizer)
     elif config.model_choice == "neuralode":

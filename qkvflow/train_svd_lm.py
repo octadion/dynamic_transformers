@@ -76,7 +76,7 @@ def main(config: TrainSVDLmConfig):
         from dataclasses import replace
         new_optimizer = replace(
             config.optimizer,
-            weight_decay_modules=r".*(U|V)$"
+            weight_decay_modules=r".*\.(weight|U|V)$"
         )
         config = replace(config, optimizer=new_optimizer)
     

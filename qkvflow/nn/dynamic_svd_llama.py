@@ -299,7 +299,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
             return do_block
         
         for i in range(self.config.num_layers):
-            do_block = make_do_block(i, keys[i] if keys else None)
+            do_block = make_do_block(i, keys[i])
             x = jax.checkpoint(do_block, prevent_cse=False)(x)
         
         # Final layer norm (temporal)

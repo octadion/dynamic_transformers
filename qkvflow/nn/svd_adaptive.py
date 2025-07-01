@@ -42,16 +42,6 @@ class SVDLinear(eqx.Module):
 
         weight = linear.weight
         
-        weight_matrix = weight.array
-        U_arr, S_arr, Vh_arr = jnp.linalg.svd(weight_matrix, full_matrices=False)
-        
-        if isinstance(linear.In, Axis):
-            in_size = linear.weight.axis_size(linear.In)
-        elif isinstance(linear.In, tuple):
-            in_size = math.prod(linear.weight.axis_size(ax) for ax in linear.In)
-        else:
-            raise TypeError(f"Unsupported AxisSpec type for linear.In: {type(linear.In)}")
-
         if isinstance(linear.Out, Axis):
             out_size = linear.weight.axis_size(linear.Out)
         elif isinstance(linear.Out, tuple):
@@ -59,6 +49,17 @@ class SVDLinear(eqx.Module):
         else:
             raise TypeError(f"Unsupported AxisSpec type for linear.Out: {type(linear.Out)}")
 
+        if isinstance(linear.In, Axis):
+            in_size = linear.weight.axis_size(linear.In)
+        elif isinstance(linear.In, tuple):
+            in_size = math.prod(linear.weight.axis_size(ax) for ax in linear.In)
+        else:
+            raise TypeError(f"Unsupported AxisSpec type for linear.In: {type(linear.In)}")
+
+        weight_matrix = weight.array.reshape(out_size, in_size)
+
+        U_arr, S_arr, Vh_arr = jnp.linalg.svd(weight_matrix, full_matrices=False)
+        
         full_rank = min(in_size, out_size)
         rank = max(1, int(full_rank * rank_ratio))
         Rank = hax.Axis("rank", rank)
@@ -98,11 +99,14 @@ class SVDLinear(eqx.Module):
         s_base_broadcasted = self.S_base.broadcast_axis(batch_axis)
         S_effective = s_base_broadcasted * s_multiplier
         
-        U_scaled = self.U.broadcast_axis(batch_axis) * S_effective.broadcast_axes(self.Out)
+        U_broadcasted = self.U.broadcast_axis(batch_axis)
+        S_effective_broadcasted = S_effective.broadcast_axis(self.Out)
+        
+        U_scaled = U_broadcasted * S_effective_broadcasted
 
         V_batched = self.V.broadcast_axis(batch_axis)
         W = hax.dot(self.Rank, U_scaled, V_batched)
-    
+
         return W
     
     def __call__(self, x: NamedArray, s_multiplier: NamedArray, *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:

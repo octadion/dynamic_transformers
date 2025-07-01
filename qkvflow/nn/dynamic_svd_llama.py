@@ -74,12 +74,16 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
-        """Forward pass with additive combination of temporal and SVD weights."""
-        
         # Get temporal weight and bias components
         w_gate_temporal, b_gate_temporal = self.gate_proj_temporal.evaluate_at_components(time_embed)
         w_up_temporal, b_up_temporal = self.up_proj_temporal.evaluate_at_components(time_embed)
         w_down_temporal, b_down_temporal = self.down_proj_temporal.evaluate_at_components(time_embed)
+        
+        batch_axis = multipliers['gate_proj'].axes[0]
+ 
+        w_gate_temporal = w_gate_temporal.broadcast_axis(batch_axis)
+        w_up_temporal = w_up_temporal.broadcast_axis(batch_axis)
+        w_down_temporal = w_down_temporal.broadcast_axis(batch_axis)
         
         # Get SVD weight and bias components  
         w_gate_svd = self.adaptive_mlp.gate_proj.get_effective_weight(s_multiplier=multipliers['gate_proj'])
@@ -94,6 +98,8 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
         w_down_eff = w_down_svd + w_down_temporal
         
         def combine_bias(svd_bias, temp_bias):
+            if temp_bias is not None:
+                temp_bias = temp_bias.broadcast_axis(batch_axis)
             if svd_bias is not None and temp_bias is not None:
                 return svd_bias + temp_bias
             elif svd_bias is not None:
@@ -223,7 +229,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
         *,
         key,
     ):
-        k_tembed, k_block, k_policy = jrandom.split(key, 3)
+        k_tembed, k_block, k_policy, k_norm = jrandom.split(key, 4)
         TembedDim = hax.Axis("TembedDim", time_embed_dim)
         SinusodialDim = hax.Axis("SinusodialDim", sinusodial_dim)
         time_embeding = SinusoidalPosEmb.init(SinusodialDim, key=k_tembed)
@@ -233,7 +239,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
             config, SinusodialDim, TembedDim, rank_ratio, key=k_block
         )
         norm = LlamaRMSNorm.init(
-            config.Embed, SinusodialDim=SinusodialDim, TembedDim=TembedDim, key=k_policy
+            config.Embed, SinusodialDim=SinusodialDim, TembedDim=TembedDim, key=k_norm
         )
         dt = 1.0 / config.num_layers
 
@@ -273,24 +279,28 @@ class SVDLlamaOdeTransformer(eqx.Module):
         time_embed = self.time_embedding(t)
         keys = maybe_rng_split(key, self.config.num_layers) if key is not None else [None] * self.config.num_layers
 
-        def do_block(block_template, x_in, time_embed_in, dt_in, layer_idx_in, key_in):
-            layer_multipliers = {
-                "gate_proj": multipliers.get(f"layer_{layer_idx_in}_gate_proj"),
-                "up_proj": multipliers.get(f"layer_{layer_idx_in}_up_proj"),
-                "down_proj": multipliers.get(f"layer_{layer_idx_in}_down_proj"),
-            }
-            
-            current_block = block_template
-            
-            output = current_block(time_embed_in, x_in, attn_mask, layer_idx_in, multipliers=layer_multipliers, key=key_in)
-            return x_in + output * dt_in
+        def make_do_block(layer_idx, layer_key):
+            def do_block(x_in):
+                layer_multipliers = {
+                    "gate_proj": multipliers.get(f"layer_{layer_idx}_gate_proj"),
+                    "up_proj": multipliers.get(f"layer_{layer_idx}_up_proj"),
+                    "down_proj": multipliers.get(f"layer_{layer_idx}_down_proj"),
+                }
+                
+                output = self.block(
+                    time_embed.take("layers", layer_idx), 
+                    x_in, 
+                    attn_mask, 
+                    layer_idx, 
+                    multipliers=layer_multipliers, 
+                    key=layer_key
+                )
+                return x_in + output * dts.take("layers", layer_idx)
+            return do_block
         
         for i in range(self.config.num_layers):
-            layer_key = keys[i]
-            checkpointed_fn = lambda x_i, te_i, dt_i: do_block(
-                self.block, x_i, te_i, dt_i, i, layer_key
-            )
-            x = jax.checkpoint(checkpointed_fn)(x, time_embed.take("layers", i), dts.take("layers", i))
+            do_block = make_do_block(i, keys[i] if keys else None)
+            x = jax.checkpoint(do_block, prevent_cse=False)(x)
         
         # Final layer norm (temporal)
         final_time_embed = time_embed.take("layers", -1)  # Use last time step

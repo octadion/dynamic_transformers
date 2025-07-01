@@ -121,38 +121,39 @@ class AdaptiveTemporalMLP(eqx.Module):
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
-        w_fc_svd = self.adaptive_mlp.c_fc.get_effective_weight(s_multiplier=multipliers["c_fc"])
-        b_fc_svd = self.adaptive_mlp.c_fc.bias
 
         w_fc_temporal, b_fc_temporal = self.c_fc_temporal.evaluate_at_components(time_embed)
-
-        w_fc_eff = w_fc_svd + w_fc_temporal
+        w_proj_temporal, b_proj_temporal = self.c_proj_temporal.evaluate_at_components(time_embed)
         
-        b_fc_eff = None
-        if b_fc_svd is not None:
-            b_fc_eff = b_fc_svd
-        if b_fc_temporal is not None:
-            b_fc_eff = b_fc_temporal if b_fc_eff is None else b_fc_eff + b_fc_temporal
+        batch_axis = multipliers['c_fc'].axes[0]
 
+        w_fc_temporal = w_fc_temporal.broadcast_axis(batch_axis)
+        w_proj_temporal = w_proj_temporal.broadcast_axis(batch_axis)
+
+        w_fc_svd = self.adaptive_mlp.c_fc.get_effective_weight(s_multiplier=multipliers['c_fc'])
+        w_proj_svd = self.adaptive_mlp.c_proj.get_effective_weight(s_multiplier=multipliers['c_proj'])
+
+        b_fc_svd = self.adaptive_mlp.c_fc.bias
+        b_proj_svd = self.adaptive_mlp.c_proj.bias
+        
+        w_fc_eff = w_fc_svd + w_fc_temporal
+        w_proj_eff = w_proj_svd + w_proj_temporal
+        
+        b_fc_eff = b_fc_svd
+        if b_fc_temporal is not None:
+            b_fc_temporal = b_fc_temporal.broadcast_axis(batch_axis)
+            b_fc_eff = b_fc_temporal if b_fc_eff is None else b_fc_eff + b_fc_temporal
+            
+        b_proj_eff = b_proj_svd
+        if b_proj_temporal is not None:
+            b_proj_temporal = b_proj_temporal.broadcast_axis(batch_axis)
+            b_proj_eff = b_proj_temporal if b_proj_eff is None else b_proj_eff + b_proj_temporal
+        
         x = hax.dot(self.adaptive_mlp.c_fc.In, x, w_fc_eff)
         if b_fc_eff is not None:
             x = x + b_fc_eff
-
         x = self.act(x)
-
-        w_proj_svd = self.adaptive_mlp.c_proj.get_effective_weight(s_multiplier=multipliers["c_proj"])
-        b_proj_svd = self.adaptive_mlp.c_proj.bias
-
-        w_proj_temporal, b_proj_temporal = self.c_proj_temporal.evaluate_at_components(time_embed)
-
-        w_proj_eff = w_proj_svd + w_proj_temporal
-
-        b_proj_eff = None
-        if b_proj_svd is not None:
-            b_proj_eff = b_proj_svd
-        if b_proj_temporal is not None:
-            b_proj_eff = b_proj_temporal if b_proj_eff is None else b_proj_eff + b_proj_temporal
-
+        
         x = hax.dot(self.adaptive_mlp.c_proj.In, x, w_proj_eff)
         if b_proj_eff is not None:
             x = x + b_proj_eff
@@ -219,9 +220,7 @@ class SVDNeuralOdeTransformer(eqx.Module):
         )
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
-
         task_vector = x.mean(axis=self.config.Pos)
-
         multipliers = self.policy(task_vector)
 
         t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
@@ -229,23 +228,27 @@ class SVDNeuralOdeTransformer(eqx.Module):
         time_embed = self.time_embedding(t)
         keys = maybe_rng_split(key, self.config.num_layers) if key is not None else [None] * self.config.num_layers
 
-        def do_block(block_template, x_in, time_embed_in, dt_in, layer_idx_in, key_in):
-            layer_multipliers = {
-                "c_fc": multipliers.get(f"layer_{layer_idx_in}_c_fc"),
-                "c_proj": multipliers.get(f"layer_{layer_idx_in}_c_proj"),
-            }
-            
-            current_block = block_template
-            
-            output = current_block(time_embed_in, x_in, attn_mask, layer_idx_in, multipliers=layer_multipliers, key=key_in)
-            return x_in + output * dt_in
+        def make_do_block(layer_idx, layer_key):
+            def do_block(x_in):
+                layer_multipliers = {
+                    "c_fc": multipliers.get(f"layer_{layer_idx}_c_fc"),
+                    "c_proj": multipliers.get(f"layer_{layer_idx}_c_proj"),
+                }
+                
+                output = self.block(
+                    time_embed.take("layers", layer_idx), 
+                    x_in, 
+                    attn_mask, 
+                    layer_idx, 
+                    multipliers=layer_multipliers, 
+                    key=layer_key
+                )
+                return x_in + output * dts.take("layers", layer_idx)
+            return do_block
         
         for i in range(self.config.num_layers):
-            layer_key = keys[i]
-            checkpointed_fn = lambda x_i, te_i, dt_i: do_block(
-                self.block, x_i, te_i, dt_i, i, layer_key
-            )
-            x = jax.checkpoint(checkpointed_fn)(x, time_embed.take("layers", i), dts.take("layers", i))
+            do_block = make_do_block(i, keys[i] if keys else None)
+            x = jax.checkpoint(do_block, prevent_cse=False)(x)
         
         x = self.ln_f(x)
         return x

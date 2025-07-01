@@ -45,14 +45,14 @@ class SVDLinear(eqx.Module):
         weight_matrix = weight.array
         U_arr, S_arr, Vh_arr = jnp.linalg.svd(weight_matrix, full_matrices=False)
         
-        if isinstance(linear.In, hax.Axis):
+        if isinstance(linear.In, Axis):
             in_size = linear.weight.axis_size(linear.In)
         elif isinstance(linear.In, tuple):
             in_size = math.prod(linear.weight.axis_size(ax) for ax in linear.In)
         else:
             raise TypeError(f"Unsupported AxisSpec type for linear.In: {type(linear.In)}")
 
-        if isinstance(linear.Out, hax.Axis):
+        if isinstance(linear.Out, Axis):
             out_size = linear.weight.axis_size(linear.Out)
         elif isinstance(linear.Out, tuple):
             out_size = math.prod(linear.weight.axis_size(ax) for ax in linear.Out)
@@ -63,9 +63,9 @@ class SVDLinear(eqx.Module):
         rank = max(1, int(full_rank * rank_ratio))
         Rank = hax.Axis("rank", rank)
         
-        U_arr = U_arr[:, :rank]
-        S_arr = S_arr[:rank]
-        Vh_arr = Vh_arr[:rank, :]
+        U_arr = U_arr[:, :rank]     # [out_size, rank]
+        S_arr = S_arr[:rank]        # [rank]
+        Vh_arr = Vh_arr[:rank, :]   # [rank, in_size]
 
         if isinstance(linear.Out, tuple):
             u_axes = linear.Out + (Rank,)
@@ -77,9 +77,9 @@ class SVDLinear(eqx.Module):
         else:
             v_axes = (linear.In, Rank)
 
-        U = hax.NamedArray(U_arr, axes=v_axes)
+        U = hax.NamedArray(U_arr, axes=u_axes)
         S_base = hax.NamedArray(S_arr, axes=(Rank,))
-        V = hax.NamedArray(Vh_arr.T, axes=u_axes)
+        V = hax.NamedArray(Vh_arr.T, axes=v_axes)  # V = Vh.T
         
         return SVDLinear(
             U=U,
@@ -98,8 +98,11 @@ class SVDLinear(eqx.Module):
         s_base_broadcasted = self.S_base.broadcast_axis(batch_axis)
         S_effective = s_base_broadcasted * s_multiplier
         
-        US = self.U * S_effective.broadcast_axis(self.In)
-        W = hax.dot(self.Rank, US, self.V)
+        U_scaled = self.U.broadcast_axis(batch_axis) * S_effective.broadcast_axes(self.Out)
+
+        V_batched = self.V.broadcast_axis(batch_axis)
+        W = hax.dot(self.Rank, U_scaled, V_batched)
+    
         return W
     
     def __call__(self, x: NamedArray, s_multiplier: NamedArray, *, key: Optional[jax.random.PRNGKey] = None) -> NamedArray:
@@ -245,41 +248,32 @@ class DynamicSVDPolicy(eqx.Module):
         
     def __call__(self, task_vector: NamedArray) -> Dict[str, NamedArray]:
         import math
-        from jax import vmap
 
-        batched_flat_multipliers = self.policy_net(task_vector)
-
-        def process_single_example(flat_multipliers_single):
-            output_dict = {}
-            current_idx = 0
-            for name in self.param_names:
-                shape_info = self.rank_shapes[name]
-                num_elements = math.prod(ax.size for ax in shape_info)
-                
-                chunk = flat_multipliers_single[current_idx : current_idx + num_elements]
-
-                reshaped_chunk = chunk.reshape([ax.size for ax in shape_info])
-
-                output_dict[name] = reshaped_chunk
-                
-                current_idx += num_elements
-            return output_dict
-
-        batched_output_dict = vmap(process_single_example)(batched_flat_multipliers.array)
-
-        final_dict = {}
-
-        Batch = task_vector.axes[0] 
+        flat_multipliers = self.policy_net(task_vector)
         
-        for name, batched_array in batched_output_dict.items():
+        output_dict = {}
+        current_idx = 0
+        
+        Batch = task_vector.axes[0]
+        
+        for name in self.param_names:
+            shape_info = self.rank_shapes[name]
+            num_elements = math.prod(ax.size for ax in shape_info)
+            
+            chunk = flat_multipliers.array[..., current_idx:current_idx + num_elements]
 
-            original_axes = self.rank_shapes[name]
+            batch_shape = chunk.shape[:-1]
+            target_shape = batch_shape + tuple(ax.size for ax in shape_info)
+            chunk_reshaped = chunk.reshape(target_shape)
 
-            new_axes = (Batch,) + original_axes
+            new_axes = (Batch,) + shape_info
 
-            final_dict[name] = hax.named(batched_array, new_axes)
-
-        return final_dict
+            chunk_clipped = jnp.clip(chunk_reshaped, 0.1, 10.0)
+            output_dict[name] = hax.named(chunk_clipped, new_axes)
+            
+            current_idx += num_elements
+        
+        return output_dict
         
     def get_policy_params(self):
         return {"policy_net": self.policy_net}

@@ -76,7 +76,7 @@ def main(config: TrainSVDLmConfig):
         from dataclasses import replace
         new_optimizer = replace(
             config.optimizer,
-            weight_decay_modules=r".*weight|.*bias|.*s_multiplier|.*time_embedding|.*token_embeddings|.*position_embeddings"
+            weight_decay_modules=r".*(U|V)$"
         )
         config = replace(config, optimizer=new_optimizer)
     
@@ -84,7 +84,7 @@ def main(config: TrainSVDLmConfig):
 
     if config.train_policy_only:
         def is_policy_param(path, value):
-            return "policy" in path and "multipliers" in path
+            return "policy.policy_net" in path
         
         trainer = Trainer(
             config.trainer, 

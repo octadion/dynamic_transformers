@@ -68,6 +68,21 @@ class SVDLinear(eqx.Module):
         S_arr = S_arr[:rank]        # [rank]
         Vh_arr = Vh_arr[:rank, :]   # [rank, in_size]
 
+        U_arr, S_arr, Vh_arr = jnp.linalg.svd(weight_matrix, full_matrices=False)
+
+        full_rank = min(in_size, out_size)
+        rank = max(1, int(full_rank * rank_ratio))
+        Rank = hax.Axis("rank", rank)
+
+        U_arr = U_arr[:, :rank]
+        S_arr_truncated = S_arr[:rank]
+        Vh_arr = Vh_arr[:rank, :]
+
+        s_norm = jnp.linalg.norm(S_arr_truncated)
+        S_arr_normalized = S_arr_truncated / (s_norm + 1e-8)
+
+        S_base = hax.NamedArray(S_arr_normalized, axes=(Rank,))
+
         if isinstance(linear.Out, tuple):
             u_axes = linear.Out + (Rank,)
         else:
@@ -79,9 +94,8 @@ class SVDLinear(eqx.Module):
             v_axes = (linear.In, Rank)
 
         U = hax.NamedArray(U_arr, axes=u_axes)
-        S_base = hax.NamedArray(S_arr, axes=(Rank,))
         V = hax.NamedArray(Vh_arr.T, axes=v_axes)  # V = Vh.T
-        
+
         return SVDLinear(
             U=U,
             S_base=S_base,
@@ -95,17 +109,19 @@ class SVDLinear(eqx.Module):
     
     def get_effective_weight(self, s_multiplier: NamedArray) -> NamedArray:
         """Reconstruct weight matrix with modulated singular values."""
-        batch_axis = s_multiplier.axes[0]
-        s_base_broadcasted = self.S_base.broadcast_axis(batch_axis)
-        S_effective = s_base_broadcasted * s_multiplier
-        
-        U_broadcasted = self.U.broadcast_axis(batch_axis)
-        S_effective_broadcasted = S_effective.broadcast_axis(self.Out)
-        
+        assert self.Rank in s_multiplier.axes, f"Rank axis {self.Rank} tidak ditemukan di s_multiplier {s_multiplier.axes}"
+        batch_axes = tuple(ax for ax in s_multiplier.axes if ax != self.Rank)
+
+        S_effective = self.S_base * s_multiplier
+
+        U_broadcasted = self.U.broadcast_axis(batch_axes)
+
+        S_effective_broadcasted = S_effective.broadcast_to(U_broadcasted.axes)
+
         U_scaled = U_broadcasted * S_effective_broadcasted
 
-        V_batched = self.V.broadcast_axis(batch_axis)
-        W = hax.dot(self.Rank, U_scaled, V_batched)
+        V_broadcasted = self.V.broadcast_axis(batch_axes)
+        W = hax.dot(self.Rank, U_scaled, V_broadcasted)
 
         return W
     
@@ -243,6 +259,10 @@ class DynamicSVDPolicy(eqx.Module):
         l2 = hnn.Linear.init(In=Hidden, Out=MlpOutput, key=k_l2, use_bias=True)
         activation = hnn.relu
 
+        l2 = eqx.tree_at(lambda l: l.weight, l2, hax.zeros_like(l2.weight))
+        if l2.bias is not None:
+            l2 = eqx.tree_at(lambda l: l.bias, l2, hax.zeros_like(l2.bias))
+
         policy_net = _PolicyNet(layer1=l1, layer2=l2, act=activation)
 
         param_names = sorted(rank_per_layer.keys())
@@ -272,8 +292,9 @@ class DynamicSVDPolicy(eqx.Module):
 
             new_axes = (Batch,) + shape_info
 
-            chunk_clipped = jnp.clip(chunk_reshaped, 0.1, 10.0)
-            output_dict[name] = hax.named(chunk_clipped, new_axes)
+            center = 1.0
+            span = 0.5
+            output_dict[name] = center + span * hax.tanh(hax.named(chunk_reshaped, new_axes))
             
             current_idx += num_elements
         

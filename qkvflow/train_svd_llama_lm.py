@@ -63,7 +63,7 @@ def log_weight_magnitudes(step_info):
     else:
         return
 
-    t = jnp.array(0.5, dtype=jnp.float32)
+    t = hax.named(jnp.array(0.5, dtype=jnp.float32), ())
     time_embed = model.transformer.time_embedding(t)
 
     Batch = hax.Axis("batch", 1)

@@ -45,7 +45,7 @@ class AdaptiveBlock(eqx.Module):
         *, 
         key
     ):
-        k_attn, k_mlp, k_adapt, k_gate = jrandom.split(key, 3)
+        k_attn, k_mlp, k_adapt, k_gate = jrandom.split(key, 4)
 
         attn_ln = TemporalLayerNorm.init(
             config.Embed,
@@ -81,8 +81,9 @@ class AdaptiveBlock(eqx.Module):
         
         initial_logit_value = -2.2 
         
-        gate_logit_fc = hax.nn.Parameter(jnp.array(initial_logit_value, dtype=jnp.float32), key=k_gate_fc)
-        gate_logit_proj = hax.nn.Parameter(jnp.array(initial_logit_value, dtype=jnp.float32), key=k_gate_proj)
+        Scalar = hax.Axis("scalar", 1)
+        gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
+        gate_logit_proj = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
     
         adaptive_mlp = AdaptiveMLP(c_fc=c_fc_svd, c_proj=c_proj_svd, act=regular_mlp.act)
 
@@ -129,12 +130,11 @@ class AdaptiveTemporalMLP(eqx.Module):
     c_proj_temporal: TemporalLinear
     adaptive_mlp: AdaptiveMLP
     act: Callable = eqx.field(static=True)
-    gate_logit_fc: hax.nn.Parameter
-    gate_logit_proj: hax.nn.Parameter
+    gate_logit_fc: hax.NamedArray
+    gate_logit_proj: hax.NamedArray
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
-
         w_fc_temporal, b_fc_temporal = self.c_fc_temporal.evaluate_at_components(time_embed)
         w_proj_temporal, b_proj_temporal = self.c_proj_temporal.evaluate_at_components(time_embed)
         
@@ -149,15 +149,23 @@ class AdaptiveTemporalMLP(eqx.Module):
         b_fc_svd = self.adaptive_mlp.c_fc.bias
         b_proj_svd = self.adaptive_mlp.c_proj.bias
         
-        gate_fc = jnn.sigmoid(self.gate_logit_fc.array)
-        gate_proj = jnn.sigmoid(self.gate_logit_proj.array)
+        gate_fc_raw = jnn.sigmoid(self.gate_logit_fc.astype(jnp.float32).array)
+        gate_proj_raw = jnn.sigmoid(self.gate_logit_proj.astype(jnp.float32).array)
 
-        w_fc_eff = gate_fc * w_fc_svd + (1 - gate_fc) * w_fc_temporal
-        w_proj_eff = gate_proj * w_proj_svd + (1 - gate_proj) * w_proj_temporal
-        
-        if wandb.run:
-             wandb.log({"gates/mlp_fc": float(gate_fc), "gates/mlp_proj": float(gate_proj)})
-        
+        w_fc_svd_raw = w_fc_svd.array
+        w_fc_temporal_raw = w_fc_temporal.array
+        w_proj_svd_raw = w_proj_svd.array
+        w_proj_temporal_raw = w_proj_temporal.array
+
+        w_fc_svd_raw = jnp.swapaxes(w_fc_svd_raw, -1, -2)
+        w_proj_svd_raw = jnp.swapaxes(w_proj_svd_raw, -1, -2)
+
+        w_fc_eff_raw = gate_fc_raw * w_fc_svd_raw + (1 - gate_fc_raw) * w_fc_temporal_raw
+        w_proj_eff_raw = gate_proj_raw * w_proj_svd_raw + (1 - gate_proj_raw) * w_proj_temporal_raw
+
+        w_fc_eff = hax.named(w_fc_eff_raw, w_fc_temporal.axes)
+        w_proj_eff = hax.named(w_proj_eff_raw, w_proj_temporal.axes)
+
         b_fc_eff = b_fc_svd
         if b_fc_temporal is not None:
             b_fc_temporal = b_fc_temporal.broadcast_axis(batch_axis)

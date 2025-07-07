@@ -8,6 +8,7 @@ import jax.random as jrandom
 import jax.numpy as jnp
 import levanter
 import equinox as eqx
+import haliax as hax
 from haliax import Axis
 from haliax.partitioning import round_axis_for_partitioning
 from levanter import callbacks
@@ -59,7 +60,7 @@ def log_weight_magnitudes(step_info):
     else:
         return
 
-    t = jnp.array(0.5, dtype=jnp.float32)
+    t = hax.named(jnp.array(0.5, dtype=jnp.float32), ())
     time_embed = model.transformer.time_embedding(t)
 
     Batch = hax.Axis("batch", 1)

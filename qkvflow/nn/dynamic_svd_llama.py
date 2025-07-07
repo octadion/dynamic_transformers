@@ -270,7 +270,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
         # Calculate task vector for SVD policy  
-        task_vector = x.mean(axis=self.config.Pos)
+        task_vector = hax.named(jnp.mean(x.array, axis=1), (x.axes[0], x.axes[2]))
         multipliers = self.policy(task_vector)
 
         # Time evolution setup

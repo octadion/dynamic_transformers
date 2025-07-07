@@ -9,12 +9,14 @@ import equinox as eqx
 import haliax as hax
 import haliax.nn as hnn
 import jax
+import jax.nn as jnn
 import jax.numpy as jnp
 import jax.random as jrandom
 from haliax import Axis, NamedArray
 from haliax.jax_utils import maybe_rng_split, named_call
 from levanter.models.gpt2 import Gpt2Config, Gpt2Embeddings
 from levanter.models.lm_model import LmExample
+import wandb
 
 from .dynamic import (
     Attention, TemporalLayerNorm, MLP, NeuralOdeTransformer,
@@ -43,7 +45,7 @@ class AdaptiveBlock(eqx.Module):
         *, 
         key
     ):
-        k_attn, k_mlp, k_adapt = jrandom.split(key, 3)
+        k_attn, k_mlp, k_adapt, k_gate = jrandom.split(key, 3)
 
         attn_ln = TemporalLayerNorm.init(
             config.Embed,
@@ -75,6 +77,13 @@ class AdaptiveBlock(eqx.Module):
         c_fc_svd = SVDLinear.from_linear(c_fc_t0, rank_ratio, key=k_fc_svd)
         c_proj_svd = SVDLinear.from_linear(c_proj_t0, rank_ratio, key=k_proj_svd)
 
+        k_gate_fc, k_gate_proj = jrandom.split(k_gate)
+        
+        initial_logit_value = -2.2 
+        
+        gate_logit_fc = hax.nn.Parameter(jnp.array(initial_logit_value, dtype=jnp.float32), key=k_gate_fc)
+        gate_logit_proj = hax.nn.Parameter(jnp.array(initial_logit_value, dtype=jnp.float32), key=k_gate_proj)
+    
         adaptive_mlp = AdaptiveMLP(c_fc=c_fc_svd, c_proj=c_proj_svd, act=regular_mlp.act)
 
         adaptive_mlp = AdaptiveTemporalMLP(
@@ -83,6 +92,8 @@ class AdaptiveBlock(eqx.Module):
             c_proj_temporal=regular_mlp.c_proj,
             adaptive_mlp=adaptive_mlp,
             act=regular_mlp.act,
+            gate_logit_fc=gate_logit_fc,
+            gate_logit_proj=gate_logit_proj
         )
         
         resid_dropout = hnn.Dropout(pdrop=config.resid_pdrop)
@@ -118,6 +129,8 @@ class AdaptiveTemporalMLP(eqx.Module):
     c_proj_temporal: TemporalLinear
     adaptive_mlp: AdaptiveMLP
     act: Callable = eqx.field(static=True)
+    gate_logit_fc: hax.nn.Parameter
+    gate_logit_proj: hax.nn.Parameter
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
@@ -136,8 +149,14 @@ class AdaptiveTemporalMLP(eqx.Module):
         b_fc_svd = self.adaptive_mlp.c_fc.bias
         b_proj_svd = self.adaptive_mlp.c_proj.bias
         
-        w_fc_eff = w_fc_svd + w_fc_temporal
-        w_proj_eff = w_proj_svd + w_proj_temporal
+        gate_fc = jnn.sigmoid(self.gate_logit_fc.array)
+        gate_proj = jnn.sigmoid(self.gate_logit_proj.array)
+
+        w_fc_eff = gate_fc * w_fc_svd + (1 - gate_fc) * w_fc_temporal
+        w_proj_eff = gate_proj * w_proj_svd + (1 - gate_proj) * w_proj_temporal
+        
+        if wandb.run:
+             wandb.log({"gates/mlp_fc": float(gate_fc), "gates/mlp_proj": float(gate_proj)})
         
         b_fc_eff = b_fc_svd
         if b_fc_temporal is not None:
@@ -220,7 +239,7 @@ class SVDNeuralOdeTransformer(eqx.Module):
         )
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
-        task_vector = x.mean(axis=self.config.Pos)
+        task_vector = hax.named(jnp.mean(x.array, axis=1), (x.axes[0], x.axes[2]))
         multipliers = self.policy(task_vector)
 
         t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt

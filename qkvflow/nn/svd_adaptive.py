@@ -259,7 +259,9 @@ class DynamicSVDPolicy(eqx.Module):
         l2 = hnn.Linear.init(In=Hidden, Out=MlpOutput, key=k_l2, use_bias=True)
         activation = hnn.relu
 
-        l2 = eqx.tree_at(lambda l: l.weight, l2, hax.zeros_like(l2.weight))
+        k_l2_w, k_l2_b = jax.random.split(k_l2)
+        new_weights = hax.random.normal(k_l2_w, l2.weight.axes) * 1e-3
+        l2 = eqx.tree_at(lambda l: l.weight, l2, new_weights)
         if l2.bias is not None:
             l2 = eqx.tree_at(lambda l: l.bias, l2, hax.zeros_like(l2.bias))
 

@@ -16,7 +16,7 @@ model:
 svd_config:
   rank_ratio: 0.5
   policy_init_scale: 0.1
-  policy_reg_strength: 0.01
+  policy_reg_strength: 0.001
 
 trainer:
   wandb:

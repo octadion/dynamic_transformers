@@ -79,7 +79,7 @@ class AdaptiveBlock(eqx.Module):
 
         k_gate_fc, k_gate_proj = jrandom.split(k_gate)
         
-        initial_logit_value = -2.2 
+        initial_logit_value = 0.0 
         
         Scalar = hax.Axis("scalar", 1)
         gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())

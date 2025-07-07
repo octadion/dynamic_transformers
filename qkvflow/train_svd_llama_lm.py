@@ -49,18 +49,35 @@ class TrainSVDLlamaLmConfig(TrainLmConfig):
     train_policy_only: bool = False 
     train_svd_from_scratch: bool = True 
 
-def log_weight_magnitudes(step_info):
+def log_diagnostics(step_info):
     if not hasattr(step_info.model.transformer, "policy"):
         return
 
     model = step_info.model
-    if hasattr(model.transformer.block, "mlp"):
-        mlp_block = model.transformer.block.mlp
-        projection_names = ["c_fc", "c_proj"]
-    elif hasattr(model.transformer.block.mlp, "adaptive_mlp"):
-        mlp_block = model.transformer.block.mlp
-        projection_names = ["gate_proj", "up_proj", "down_proj"]
-    else:
+    stats = {}
+
+    mlp_block = getattr(getattr(model.transformer, "block", None), "mlp", None)
+    if not mlp_block:
+        return
+
+    if hasattr(mlp_block, "gate_logit_fc"):
+        gate_fc_raw = jnn.sigmoid(mlp_block.gate_logit_fc.astype(jnp.float32).array)
+        stats["gates/mlp_fc"] = float(gate_fc_raw)
+    
+    if hasattr(mlp_block, "gate_logit_proj"):
+        gate_proj_raw = jnn.sigmoid(mlp_block.gate_logit_proj.astype(jnp.float32).array)
+        stats["gates/mlp_proj"] = float(gate_proj_raw)
+
+    projection_names = []
+    if hasattr(mlp_block, "adaptive_mlp"):
+        if hasattr(mlp_block.adaptive_mlp, "c_fc"):
+            projection_names = ["c_fc", "c_proj"]
+        elif hasattr(mlp_block.adaptive_mlp, "gate_proj"):
+            projection_names = ["gate_proj", "up_proj", "down_proj"]
+
+    if not projection_names:
+        if wandb.run and stats:
+            wandb.log(stats, step=step_info.step)
         return
 
     t = hax.named(jnp.array(0.5, dtype=jnp.float32), ())
@@ -71,26 +88,27 @@ def log_weight_magnitudes(step_info):
     task_vector = hax.ones((Batch, Embed))
     multipliers = model.transformer.policy(task_vector)
 
-    stats = {}
     for proj_name in projection_names:
-        temporal_proj = getattr(mlp_block, f"{proj_name}_temporal", getattr(mlp_block, proj_name, None))
-        adaptive_proj = getattr(mlp_block.adaptive_mlp, proj_name)
+        temporal_proj = getattr(mlp_block, f"{proj_name}_temporal", None)
+        adaptive_mlp = getattr(mlp_block, "adaptive_mlp", None)
+        
+        if temporal_proj and adaptive_mlp:
+            adaptive_proj = getattr(adaptive_mlp, proj_name, None)
+            if not adaptive_proj: continue
 
-        w_temporal, _ = temporal_proj.evaluate_at_components(time_embed)
+            w_temporal, _ = temporal_proj.evaluate_at_components(time_embed)
+            multiplier_key = f"layer_0_{proj_name}"
+            if multiplier_key in multipliers:
+                s_multiplier = multipliers[multiplier_key]
+                w_svd = adaptive_proj.get_effective_weight(s_multiplier=s_multiplier)
 
-        multiplier_key = f"layer_0_{proj_name}"
-        if multiplier_key in multipliers:
-            s_multiplier = multipliers[multiplier_key]
-            w_svd = adaptive_proj.get_effective_weight(s_multiplier=s_multiplier)
+                norm_temporal = jnp.linalg.norm(w_temporal.array)
+                norm_svd = jnp.linalg.norm(w_svd.array[0])
 
-            norm_temporal = jnp.linalg.norm(w_temporal.array)
-            norm_svd = jnp.linalg.norm(w_svd.array[0])
-
-            stats[f"weight_norms/{proj_name}/temporal"] = float(norm_temporal)
-            stats[f"weight_norms/{proj_name}/svd"] = float(norm_svd)
-
-            ratio = norm_svd / (norm_temporal + 1e-8)
-            stats[f"weight_norms/{proj_name}/svd_vs_temporal_ratio"] = float(ratio)
+                stats[f"weight_norms/{proj_name}/temporal"] = float(norm_temporal)
+                stats[f"weight_norms/{proj_name}/svd"] = float(norm_svd)
+                ratio = norm_svd / (norm_temporal + 1e-8)
+                stats[f"weight_norms/{proj_name}/svd_vs_temporal_ratio"] = float(ratio)
 
     if wandb.run and stats:
         wandb.log(stats, step=step_info.step)
@@ -276,7 +294,7 @@ def main(config: TrainSVDLlamaLmConfig):
           trainer.add_hook(log_policy_stats, every=config.trainer.steps_per_eval)
 
         if "svd" in config.model_choice:
-            trainer.add_hook(log_weight_magnitudes, every=config.trainer.steps_per_eval)
+            trainer.add_hook(log_diagnostics, every=config.trainer.steps_per_eval)
 
         # Add multiplier statistics for Llama SVD model
         if config.model_choice == "llamaode-svd":

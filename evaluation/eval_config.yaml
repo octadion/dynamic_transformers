@@ -37,11 +37,11 @@ datasets:
   #   split: "validation"
   #   num_samples: null
 
-  # - name: "SciQ"
-  #   dataset_name: "sciq"
-  #   split: "test"
-  #   context_key: "support"
-  #   num_samples: null
+  - name: "SciQ"
+    dataset_name: "sciq"
+    split: "test"
+    context_key: "support"
+    num_samples: null
     
   - name: "Winogrande"
     dataset_name: "winogrande"

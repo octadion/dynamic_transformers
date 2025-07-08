@@ -6,6 +6,7 @@ from typing import Optional
 import jax
 import jax.random as jrandom
 import jax.numpy as jnp
+import jax.nn as jnn
 import levanter
 import equinox as eqx
 import haliax as hax

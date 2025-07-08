@@ -79,7 +79,7 @@ class AdaptiveBlock(eqx.Module):
 
         k_gate_fc, k_gate_proj = jrandom.split(k_gate)
         
-        initial_logit_value = 0.0 
+        initial_logit_value = -2.0
         
         Scalar = hax.Axis("scalar", 1)
         gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
@@ -247,19 +247,18 @@ class SVDNeuralOdeTransformer(eqx.Module):
         )
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
-        task_vector = hax.named(jnp.mean(x.array, axis=1), (x.axes[0], x.axes[2]))
-        multipliers = self.policy(task_vector)
-
         t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
         dts = hax.ones((self.config.Layers,), dtype=x.dtype) * self.dt
         time_embed = self.time_embedding(t)
         keys = maybe_rng_split(key, self.config.num_layers) if key is not None else [None] * self.config.num_layers
 
-        def make_do_block(layer_idx, layer_key):
+        num_warmup_layers = min(3, self.config.num_layers // 4)
+
+        def make_do_block(layer_idx, layer_key, current_multipliers):
             def do_block(x_in):
                 layer_multipliers = {
-                    "c_fc": multipliers.get(f"layer_{layer_idx}_c_fc"),
-                    "c_proj": multipliers.get(f"layer_{layer_idx}_c_proj"),
+                    "c_fc": current_multipliers.get(f"layer_{layer_idx}_c_fc"),
+                    "c_proj": current_multipliers.get(f"layer_{layer_idx}_c_proj"),
                 }
                 
                 output = self.block(
@@ -272,13 +271,31 @@ class SVDNeuralOdeTransformer(eqx.Module):
                 )
                 return x_in + output * dts.take("layers", layer_idx)
             return do_block
-        
+
+        Batch = x.axes[0]
+        identity_multipliers = {}
         for i in range(self.config.num_layers):
-            do_block = make_do_block(i, keys[i])
-            x = jax.checkpoint(do_block, prevent_cse=False)(x)
+            for proj in ["c_fc", "c_proj"]:
+                param_key = f"layer_{i}_{proj}"
+                if param_key in self.policy.rank_shapes:
+                    rank_axis = self.policy.rank_shapes[param_key][0]
+                    identity_multipliers[param_key] = hax.ones((Batch, rank_axis))
+
+        x_processed = x
+        for i in range(num_warmup_layers):
+            do_block_warmup = make_do_block(i, keys[i], identity_multipliers)
+            x_processed = jax.checkpoint(do_block_warmup, prevent_cse=False)(x_processed)
+
+        task_vector = hax.mean(x_processed, axis=self.config.Pos)
+        adaptive_multipliers = self.policy(task_vector)
+
+        x_final = x_processed
+        for i in range(num_warmup_layers, self.config.num_layers):
+            do_block_adaptive = make_do_block(i, keys[i], adaptive_multipliers)
+            x_final = jax.checkpoint(do_block_adaptive, prevent_cse=False)(x_final)
         
-        x = self.ln_f(x)
-        return x
+        x_final = self.ln_f(x_final)
+        return x_final
 
     def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
         params = eqx.filter(self.policy.policy_net, eqx.is_array)

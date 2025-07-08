@@ -79,7 +79,7 @@ class AdaptiveBlock(eqx.Module):
 
         k_gate_fc, k_gate_proj = jrandom.split(k_gate)
         
-        initial_logit_value = -2.0
+        initial_logit_value = 0.0
         
         Scalar = hax.Axis("scalar", 1)
         gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
@@ -286,7 +286,7 @@ class SVDNeuralOdeTransformer(eqx.Module):
             do_block_warmup = make_do_block(i, keys[i], identity_multipliers)
             x_processed = jax.checkpoint(do_block_warmup, prevent_cse=False)(x_processed)
 
-        task_vector = hax.mean(x_processed, axis=self.config.Pos)
+        task_vector = hax.mean(x_processed, axis="position")
         adaptive_multipliers = self.policy(task_vector)
 
         x_final = x_processed
@@ -297,10 +297,10 @@ class SVDNeuralOdeTransformer(eqx.Module):
         x_final = self.ln_f(x_final)
         return x_final
 
-    def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
-        params = eqx.filter(self.policy.policy_net, eqx.is_array)
-        loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
-        return loss * reg_strength
+    # def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
+    #     params = eqx.filter(self.policy.policy_net, eqx.is_array)
+    #     loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
+    #     return loss * reg_strength
 
 
 class SVDNeuralOdeLMHeadModel(eqx.Module):
@@ -348,13 +348,13 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
     
     def __call__(
         self, input_ids: NamedArray, attn_mask=None, *, key=None
-    ) -> NamedArray:
+    ) -> tuple[NamedArray, NamedArray]:
         k_embed, k_transformer = maybe_rng_split(key, 2)
         x = self.embeddings.embed(input_ids, key=k_embed)
-        x = self.transformer(x, attn_mask, key=k_transformer)
-        lm_logits = self.embeddings.unembed(x)
-        
-        return lm_logits
+        hidden_states = self.transformer(x, attn_mask, key=k_transformer)
+        lm_logits = self.embeddings.unembed(hidden_states)
+
+        return lm_logits, hidden_states
     
     def compute_loss(
         self,
@@ -365,11 +365,11 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
         reduction_axis: Optional[hax.AxisSelection] = None,
         policy_reg_strength: float = 0.01,
     ) -> NamedArray:
-        """Compute language modeling loss with policy regularization."""
-        logits = self(example.tokens, example.attn_mask, key=key)
+        logits, hidden_states = self(example.tokens, example.attn_mask, key=key)
+
         targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
-        
+
         lm_loss = hnn.cross_entropy_loss(
             logits,
             self.Vocab,
@@ -378,11 +378,32 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
             reduction_axis=reduction_axis,
             where=example.loss_mask,
         )
-        
-        # Add policy regularization
-        policy_loss = self.transformer.get_policy_loss(policy_reg_strength)
-        
-        return lm_loss + policy_loss
+
+        x_processed = hidden_states
+        task_vector = hax.mean(x_processed, axis="position")
+
+        multipliers = self.transformer.policy(task_vector)
+
+        policy_loss = 0.0
+        num_multipliers = 0
+        for m in multipliers.values():
+            if m is not None:
+                policy_loss += hax.sum((m - 1.0) ** 2).scalar()
+                num_multipliers += m.size
+
+        if num_multipliers > 0:
+            policy_loss = policy_loss / num_multipliers
+
+        total_loss = lm_loss + policy_loss * policy_reg_strength
+
+        if wandb.run:
+            wandb.log({
+                "train/lm_loss": lm_loss.item(),
+                "train/policy_loss": policy_loss,
+                "train/policy_reg_strength": policy_reg_strength
+            }, step=wandb.run.step)
+
+        return total_loss
     
     @property
     def vocab_size(self) -> int:

@@ -295,7 +295,7 @@ class DynamicSVDPolicy(eqx.Module):
             new_axes = (Batch,) + shape_info
 
             center = 1.0
-            span = 0.5
+            span = 1.0
             output_dict[name] = center + span * hax.tanh(hax.named(chunk_reshaped, new_axes))
             
             current_idx += num_elements

@@ -63,7 +63,7 @@ class LlamaAdaptiveMLP(eqx.Module):
 
 
 class LlamaAdaptiveTemporalMLP(eqx.Module):
-    """Llama MLP with temporal evolution and SVD adaptation combined additively."""
+    """Llama MLP with temporal evolution and SVD adaptation combined residually."""
     
     config: LlamaConfig = eqx.field(static=True)
     gate_proj_temporal: TemporalLinear
@@ -74,7 +74,6 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
-        # Get temporal weight and bias components
         w_gate_temporal, b_gate_temporal = self.gate_proj_temporal.evaluate_at_components(time_embed)
         w_up_temporal, b_up_temporal = self.up_proj_temporal.evaluate_at_components(time_embed)
         w_down_temporal, b_down_temporal = self.down_proj_temporal.evaluate_at_components(time_embed)
@@ -92,13 +91,9 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
         w_down_svd = self.adaptive_mlp.down_proj.get_effective_weight(s_multiplier=multipliers['down_proj'])
         b_down_svd = self.adaptive_mlp.down_proj.bias
 
-        g_gate = jax.nn.sigmoid(self.gate_logit_gate.astype(jnp.float32).array)
-        g_up = jax.nn.sigmoid(self.gate_logit_up.astype(jnp.float32).array)
-        g_down = jax.nn.sigmoid(self.gate_logit_down.astype(jnp.float32).array)
-
-        w_gate_eff = g_gate * w_gate_svd + (1 - g_gate) * w_gate_temporal
-        w_up_eff = g_up * w_up_svd + (1 - g_up) * w_up_temporal
-        w_down_eff = g_down * w_down_svd + (1 - g_down) * w_down_temporal
+        w_gate_eff = w_gate_temporal + w_gate_svd
+        w_up_eff = w_up_temporal + w_up_svd
+        w_down_eff = w_down_temporal + w_down_svd
         
         def combine_bias(svd_bias, temp_bias):
             if temp_bias is not None:
@@ -145,7 +140,7 @@ class LlamaAdaptiveBlock(eqx.Module):
         *, 
         key
     ):
-        k_attn, k_mlp, k_adapt, ln_1_key, ln_2_key, k_gate = jrandom.split(key, 6)
+        k_attn, k_mlp, k_adapt, ln_1_key, ln_2_key = jrandom.split(key, 5)
 
         self_attn = LlamaAttention.init(config, SinusodialDim, TembedDim, key=k_attn)
 
@@ -156,21 +151,13 @@ class LlamaAdaptiveBlock(eqx.Module):
 
         adaptive_mlp = LlamaAdaptiveMLP.from_mlp(regular_mlp, rank_ratio, key=k_adapt)
 
-        initial_logit_value = 0.0 
-        gate_logit_gate = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
-        gate_logit_up = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
-        gate_logit_down = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
-
         adaptive_temporal_mlp = LlamaAdaptiveTemporalMLP(
             config=config,
             gate_proj_temporal=regular_mlp.gate_proj,
             up_proj_temporal=regular_mlp.up_proj,
             down_proj_temporal=regular_mlp.down_proj,
             adaptive_mlp=adaptive_mlp,
-            act=regular_mlp.act,
-            gate_logit_gate=gate_logit_gate,
-            gate_logit_up=gate_logit_up,
-            gate_logit_down=gate_logit_down,
+            act=regular_mlp.act
         )
 
         input_layernorm = LlamaRMSNorm.init(

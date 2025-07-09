@@ -68,10 +68,7 @@ class SVDLinear(eqx.Module):
         S_arr_truncated = S_arr[:rank]
         Vh_arr = Vh_arr[:rank, :]
 
-        s_norm = jnp.linalg.norm(S_arr_truncated)
-        S_arr_normalized = S_arr_truncated / (s_norm + 1e-8)
-
-        S_base = hax.NamedArray(S_arr_normalized, axes=(Rank,))
+        S_base = hax.NamedArray(S_arr_truncated, axes=(Rank,))
 
         if isinstance(linear.Out, tuple):
             u_axes = linear.Out + (Rank,)

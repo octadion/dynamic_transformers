@@ -26,14 +26,14 @@ from .svd_adaptive import AdaptiveMLP, SVDPolicy, SVDLinear, DynamicSVDPolicy
 
 
 class AdaptiveBlock(eqx.Module):
-    """Transformer block with SVD-adaptive MLP."""
+    """Transformer block with SVD-adaptive MLP, now using residual mixing."""
     
     config: Gpt2Config = eqx.field(static=True)
     
     attn_ln: TemporalLayerNorm
     attn: Attention
     mlp_ln: TemporalLayerNorm
-    mlp: AdaptiveMLP
+    mlp: "AdaptiveTemporalMLP"
     resid_dropout: hnn.Dropout
     
     @staticmethod
@@ -45,7 +45,7 @@ class AdaptiveBlock(eqx.Module):
         *, 
         key
     ):
-        k_attn, k_mlp, k_adapt, k_gate = jrandom.split(key, 4)
+        k_attn, k_mlp, k_adapt = jrandom.split(key, 3)
 
         attn_ln = TemporalLayerNorm.init(
             config.Embed,
@@ -77,29 +77,19 @@ class AdaptiveBlock(eqx.Module):
         c_fc_svd = SVDLinear.from_linear(c_fc_t0, rank_ratio, key=k_fc_svd)
         c_proj_svd = SVDLinear.from_linear(c_proj_t0, rank_ratio, key=k_proj_svd)
 
-        k_gate_fc, k_gate_proj = jrandom.split(k_gate)
-        
-        initial_logit_value = 0.0
-        
-        Scalar = hax.Axis("scalar", 1)
-        gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
-        gate_logit_proj = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
-    
-        adaptive_mlp = AdaptiveMLP(c_fc=c_fc_svd, c_proj=c_proj_svd, act=regular_mlp.act)
+        adaptive_mlp_svd_part = AdaptiveMLP(c_fc=c_fc_svd, c_proj=c_proj_svd, act=regular_mlp.act)
 
-        adaptive_mlp = AdaptiveTemporalMLP(
+        adaptive_temporal_mlp = AdaptiveTemporalMLP(
             config=config,
             c_fc_temporal=regular_mlp.c_fc,
             c_proj_temporal=regular_mlp.c_proj,
-            adaptive_mlp=adaptive_mlp,
-            act=regular_mlp.act,
-            gate_logit_fc=gate_logit_fc,
-            gate_logit_proj=gate_logit_proj
+            adaptive_mlp=adaptive_mlp_svd_part,
+            act=regular_mlp.act
         )
         
         resid_dropout = hnn.Dropout(pdrop=config.resid_pdrop)
         
-        return AdaptiveBlock(config, attn_ln, attn, mlp_ln, adaptive_mlp, resid_dropout)
+        return AdaptiveBlock(config, attn_ln, attn, mlp_ln, adaptive_temporal_mlp, resid_dropout)
     
     def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key):
         k1, k2, k3, k4 = maybe_rng_split(key, 4)
@@ -130,8 +120,7 @@ class AdaptiveTemporalMLP(eqx.Module):
     c_proj_temporal: TemporalLinear
     adaptive_mlp: AdaptiveMLP
     act: Callable = eqx.field(static=True)
-    gate_logit_fc: hax.NamedArray
-    gate_logit_proj: hax.NamedArray
+    
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
@@ -149,32 +138,23 @@ class AdaptiveTemporalMLP(eqx.Module):
         b_fc_svd = self.adaptive_mlp.c_fc.bias
         b_proj_svd = self.adaptive_mlp.c_proj.bias
         
-        gate_fc_raw = jnn.sigmoid(self.gate_logit_fc.astype(jnp.float32).array)
-        gate_proj_raw = jnn.sigmoid(self.gate_logit_proj.astype(jnp.float32).array)
+        w_fc_eff = w_fc_temporal + w_fc_svd
+        w_proj_eff = w_proj_temporal + w_proj_svd
 
-        w_fc_svd_raw = w_fc_svd.array
-        w_fc_temporal_raw = w_fc_temporal.array
-        w_proj_svd_raw = w_proj_svd.array
-        w_proj_temporal_raw = w_proj_temporal.array
+        def combine_bias(temporal_bias, svd_bias):
+            if svd_bias is None and temporal_bias is None:
+                return None
 
-        w_fc_svd_raw = jnp.swapaxes(w_fc_svd_raw, -1, -2)
-        w_proj_svd_raw = jnp.swapaxes(w_proj_svd_raw, -1, -2)
-
-        w_fc_eff_raw = gate_fc_raw * w_fc_svd_raw + (1 - gate_fc_raw) * w_fc_temporal_raw
-        w_proj_eff_raw = gate_proj_raw * w_proj_svd_raw + (1 - gate_proj_raw) * w_proj_temporal_raw
-
-        w_fc_eff = hax.named(w_fc_eff_raw, w_fc_temporal.axes)
-        w_proj_eff = hax.named(w_proj_eff_raw, w_proj_temporal.axes)
-
-        b_fc_eff = b_fc_svd
-        if b_fc_temporal is not None:
-            b_fc_temporal = b_fc_temporal.broadcast_axis(batch_axis)
-            b_fc_eff = b_fc_temporal if b_fc_eff is None else b_fc_eff + b_fc_temporal
+            if temporal_bias is not None:
+                temporal_bias = temporal_bias.broadcast_axis(batch_axis)
             
-        b_proj_eff = b_proj_svd
-        if b_proj_temporal is not None:
-            b_proj_temporal = b_proj_temporal.broadcast_axis(batch_axis)
-            b_proj_eff = b_proj_temporal if b_proj_eff is None else b_proj_eff + b_proj_temporal
+            if svd_bias is not None and temporal_bias is not None:
+                return svd_bias + temporal_bias
+            
+            return svd_bias if svd_bias is not None else temporal_bias
+
+        b_fc_eff = combine_bias(b_fc_temporal, b_fc_svd)
+        b_proj_eff = combine_bias(b_proj_temporal, b_proj_svd)
         
         x = hax.dot(self.adaptive_mlp.c_fc.In, x, w_fc_eff)
         if b_fc_eff is not None:

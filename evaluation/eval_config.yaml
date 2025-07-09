@@ -1,6 +1,6 @@
 model_checkpoints:
   - name: "GPT2 SVD Neural ODE"
-    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/pvgheal0"
+    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/smpc9hx5"
     config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano.yaml"
 
   # - name: "Llama SVD Neural ODE"
@@ -37,11 +37,11 @@ datasets:
   #   split: "validation"
   #   num_samples: null
 
-  - name: "SciQ"
-    dataset_name: "sciq"
-    split: "test"
-    context_key: "support"
-    num_samples: null
+  # - name: "SciQ"
+  #   dataset_name: "sciq"
+  #   split: "test"
+  #   context_key: "support"
+  #   num_samples: null
     
   - name: "Winogrande"
     dataset_name: "winogrande"

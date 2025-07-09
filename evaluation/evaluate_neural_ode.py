@@ -136,8 +136,18 @@ class MultipleChoiceEvaluator:
                 answer = ex["answerKey"]; ans_idx = ord(answer) - ord('A') if not answer.isdigit() else int(answer) - 1
                 return ex["question"], ex["choices"]["text"], ans_idx
             elif ds_name == "SciQ":
-                choices = [ex["distractor1"], ex["distractor2"], ex["distractor3"], ex["correct_answer"]]; correct_text = ex["correct_answer"]; choices.sort()
-                return ex["question"], choices, choices.index(correct_text)
+                choices = [
+                    ex["correct_answer"], 
+                    ex["distractor1"], 
+                    ex["distractor2"], 
+                    ex["distractor3"]
+                ]
+                correct_text = ex["correct_answer"]
+                import random
+                rng = random.Random(42)
+                rng.shuffle(choices)
+                correct_answer_index = choices.index(correct_text)
+                return ex["question"], choices, correct_answer_index
             elif ds_name == "Winogrande": return ex["sentence"], [ex["option1"], ex["option2"]], int(ex["answer"]) - 1
             else: raise ValueError(f"Dataset logic not implemented for: {ds_name}")
         question, choices, correct_answer_index = get_details(example, dataset_config.name)
@@ -173,7 +183,7 @@ class MultipleChoiceEvaluator:
             attn_mask = hax.named(jnp.array(inputs['attention_mask']), (Batch, Pos))
             loss_mask_ax = hax.named(loss_masks, (Batch, Pos))
             
-            logits = model(tokens, attn_mask)
+            logits, _ = model(tokens, attn_mask)
             Vocab = logits.axes[-1]
 
             target_y = hax.nn.one_hot(hax.named(labels, tokens.axes), Vocab, dtype=logits.dtype)

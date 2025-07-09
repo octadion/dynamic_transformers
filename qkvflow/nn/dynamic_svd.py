@@ -371,12 +371,7 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
 
         lm_loss = hnn.cross_entropy_loss(
-            logits,
-            self.Vocab,
-            target_y,
-            reduction,
-            reduction_axis=reduction_axis,
-            where=example.loss_mask,
+            logits, self.Vocab, target_y, reduction, reduction_axis=reduction_axis, where=example.loss_mask
         )
 
         x_processed = hidden_states
@@ -396,12 +391,6 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
 
         total_loss = lm_loss + policy_loss * policy_reg_strength
 
-        if wandb.run:
-            wandb.log({
-                "train/lm_loss": lm_loss.item(),
-                "train/policy_loss": policy_loss,
-                "train/policy_reg_strength": policy_reg_strength
-            }, step=wandb.run.step)
 
         return total_loss
     

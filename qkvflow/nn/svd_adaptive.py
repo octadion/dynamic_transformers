@@ -64,16 +64,6 @@ class SVDLinear(eqx.Module):
         rank = max(1, int(full_rank * rank_ratio))
         Rank = hax.Axis("rank", rank)
         
-        U_arr = U_arr[:, :rank]     # [out_size, rank]
-        S_arr = S_arr[:rank]        # [rank]
-        Vh_arr = Vh_arr[:rank, :]   # [rank, in_size]
-
-        U_arr, S_arr, Vh_arr = jnp.linalg.svd(weight_matrix, full_matrices=False)
-
-        full_rank = min(in_size, out_size)
-        rank = max(1, int(full_rank * rank_ratio))
-        Rank = hax.Axis("rank", rank)
-
         U_arr = U_arr[:, :rank]
         S_arr_truncated = S_arr[:rank]
         Vh_arr = Vh_arr[:rank, :]
@@ -242,7 +232,7 @@ class DynamicSVDPolicy(eqx.Module):
         num_layers: int,
         rank_per_layer: dict[str, int],
         task_vector_dim: Axis,
-        hidden_dim_ratio: int = 4,
+        hidden_dim_ratio: int = 8,
         *,
         key: jax.random.PRNGKey,
     ) -> "DynamicSVDPolicy":

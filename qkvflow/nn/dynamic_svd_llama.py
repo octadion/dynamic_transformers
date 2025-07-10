@@ -17,10 +17,9 @@ from haliax.jax_utils import maybe_rng_split, named_call
 from levanter.models.llama import LlamaConfig
 from levanter.models.lm_model import LmExample
 
-from .dynamic import TemporalLinear, SinusoidalPosEmb, AlternativeTimeEmbeding
+from .dynamic import TemporalLinear, SinusoidalPosEmb
 from .dynamic_llama import (
-    LlamaAttention, LlamaRMSNorm, LlamaEmbedding, LlamaMlp,
-    _apply_rotary_pos_emb, _rotate_half
+    LlamaAttention, LlamaRMSNorm, LlamaEmbedding, LlamaMlp
 )
 from .svd_adaptive import SVDLinear, DynamicSVDPolicy
 
@@ -38,13 +37,11 @@ class LlamaAdaptiveMLP(eqx.Module):
         """Create LlamaAdaptiveMLP from existing LlamaMlp."""
         k1, k2, k3 = jrandom.split(key, 3)
         
-        # Extract temporal linear components at t=0 to get base weights
         t0_embed = hax.zeros((mlp.gate_proj.TembedDim,))
         gate_proj_t0 = mlp.gate_proj.evaluate_at(t0_embed)
         up_proj_t0 = mlp.up_proj.evaluate_at(t0_embed)
         down_proj_t0 = mlp.down_proj.evaluate_at(t0_embed)
         
-        # Create SVD versions
         gate_proj = SVDLinear.from_linear(gate_proj_t0, rank_ratio, key=k1)
         up_proj = SVDLinear.from_linear(up_proj_t0, rank_ratio, key=k2)
         down_proj = SVDLinear.from_linear(down_proj_t0, rank_ratio, key=k3)
@@ -63,7 +60,7 @@ class LlamaAdaptiveMLP(eqx.Module):
 
 
 class LlamaAdaptiveTemporalMLP(eqx.Module):
-    """Llama MLP with temporal evolution and SVD adaptation combined additively."""
+    """Llama MLP with temporal evolution and SVD adaptation combined via gating."""
     
     config: LlamaConfig = eqx.field(static=True)
     gate_proj_temporal: TemporalLinear
@@ -77,7 +74,6 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
-        # Get temporal weight and bias components
         w_gate_temporal, b_gate_temporal = self.gate_proj_temporal.evaluate_at_components(time_embed)
         w_up_temporal, b_up_temporal = self.up_proj_temporal.evaluate_at_components(time_embed)
         w_down_temporal, b_down_temporal = self.down_proj_temporal.evaluate_at_components(time_embed)
@@ -87,8 +83,7 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
         w_gate_temporal = w_gate_temporal.broadcast_axis(batch_axis)
         w_up_temporal = w_up_temporal.broadcast_axis(batch_axis)
         w_down_temporal = w_down_temporal.broadcast_axis(batch_axis)
-        
-        # Get SVD weight and bias components  
+          
         w_gate_svd = self.adaptive_mlp.gate_proj.get_effective_weight(s_multiplier=multipliers['gate_proj'])
         b_gate_svd = self.adaptive_mlp.gate_proj.bias
         w_up_svd = self.adaptive_mlp.up_proj.get_effective_weight(s_multiplier=multipliers['up_proj'])
@@ -126,7 +121,6 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
         b_up_eff = combine_bias(b_up_svd, b_up_temporal)
         b_down_eff = combine_bias(b_down_svd, b_down_temporal)
         
-        # SwiGLU forward pass with effective weights
         gate = hax.dot(self.adaptive_mlp.gate_proj.In, x, w_gate_eff)
         if b_gate_eff is not None:
             gate = gate + b_gate_eff
@@ -146,6 +140,14 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
 
 
 class LlamaAdaptiveBlock(eqx.Module):
+    """Llama transformer block with SVD-adaptive MLP and temporal evolution."""
+    
+    config: LlamaConfig = eqx.field(static=True)
+    self_attn: LlamaAttention
+    mlp: LlamaAdaptiveTemporalMLP
+    input_layernorm: LlamaRMSNorm
+    post_attention_layernorm: LlamaRMSNorm
+    
     @staticmethod
     def init(
         config: LlamaConfig, 
@@ -183,8 +185,12 @@ class LlamaAdaptiveBlock(eqx.Module):
             gate_logit_down=gate_logit_down
         )
         
-        input_layernorm = LlamaRMSNorm.init(...)
-        post_attention_layernorm = LlamaRMSNorm.init(...)
+        input_layernorm = LlamaRMSNorm.init(
+            config.Embed, SinusodialDim=SinusodialDim, TembedDim=TembedDim, key=ln_1_key
+        )
+        post_attention_layernorm = LlamaRMSNorm.init(
+            config.Embed, SinusodialDim=SinusodialDim, TembedDim=TembedDim, key=ln_2_key
+        )
         
         return LlamaAdaptiveBlock(config, self_attn, adaptive_temporal_mlp, input_layernorm, post_attention_layernorm)
     
@@ -214,7 +220,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
     """Llama Neural ODE Transformer with SVD-based weight adaptation."""
     
     config: LlamaConfig = eqx.field(static=True)
-    time_embedding: AlternativeTimeEmbeding
+    time_embedding: eqx.Module
     block: LlamaAdaptiveBlock
     norm: LlamaRMSNorm
     policy: DynamicSVDPolicy
@@ -235,7 +241,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
         k_tembed, k_block, k_policy, k_norm = jrandom.split(key, 4)
         TembedDim = hax.Axis("TembedDim", time_embed_dim)
         SinusodialDim = hax.Axis("SinusodialDim", sinusodial_dim)
-        time_embeding = SinusoidalPosEmb.init(SinusodialDim, key=k_tembed)
+        time_embedding = SinusoidalPosEmb.init(SinusodialDim, key=k_tembed)
         SinusodialDim = SinusodialDim.resize(sinusodial_dim * 2 + 1)
 
         block = LlamaAdaptiveBlock.init(
@@ -246,7 +252,6 @@ class SVDLlamaOdeTransformer(eqx.Module):
         )
         dt = 1.0 / config.num_layers
 
-        # Create policy for all MLP projections across layers
         mlp_in_size = config.Embed.size
         mlp_hidden_size = config.Mlp.size
 
@@ -268,7 +273,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
         )
         
         return SVDLlamaOdeTransformer(
-            config, time_embeding, block, norm, policy, dt, rank_ratio
+            config, time_embedding, block, norm, policy, dt, rank_ratio
         )
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
@@ -321,7 +326,6 @@ class SVDLlamaOdeTransformer(eqx.Module):
         return x_final
 
     def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
-        """Policy regularization loss."""
         params = eqx.filter(self.policy.policy_net, eqx.is_array)
         loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
         return loss * reg_strength
@@ -390,7 +394,6 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
         reduction_axis: Optional[hax.AxisSelection] = None,
         policy_reg_strength: float = 0.01,
     ) -> NamedArray:
-        """Compute language modeling loss with policy regularization."""
         logits = self(example.tokens, example.attn_mask, key=key)
         targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
@@ -404,7 +407,6 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
             where=example.loss_mask,
         )
         
-        # Add policy regularization
         policy_loss = self.transformer.get_policy_loss(policy_reg_strength)
         
         return lm_loss + policy_loss
@@ -427,11 +429,9 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
         return {"transformer": None, "embeddings": None, "lm_head": None}
 
     def get_policy_params(self) -> Dict[str, NamedArray]:
-        """Get policy parameters for saving/loading."""
         return self.transformer.policy.get_policy_params()
     
     def set_policy_params(self, params: Dict[str, NamedArray]):
-        """Set policy parameters from loaded values."""
         new_policy_net = params["policy_net"]
         new_policy = dataclasses.replace(self.transformer.policy, policy_net=new_policy_net)
         new_transformer = dataclasses.replace(

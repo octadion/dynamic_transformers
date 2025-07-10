@@ -132,11 +132,14 @@ def main(config: TrainSVDLlamaLmConfig):
     parameter_axis_mapping = config.trainer.parameter_axis_mapping
     
     def compute_loss(model: LmHeadModel, example: LmExample, key=None):
-        return model.compute_loss(
-            example, 
-            key=key, 
-            policy_reg_strength=config.svd_config.policy_reg_strength
-        ).scalar()
+        if hasattr(model, 'compute_loss') and hasattr(model.compute_loss, '__code__'):
+            if 'policy_reg_strength' in model.compute_loss.__code__.co_varnames:
+                return model.compute_loss(
+                    example, 
+                    key=key, 
+                    policy_reg_strength=config.svd_config.policy_reg_strength
+                ).scalar()
+        return model.compute_loss(example, key=key).scalar()
     
     # Configure weight decay patterns based on model type
     if config.model_choice == "llamaode-svd":

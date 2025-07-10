@@ -64,11 +64,24 @@ class SVDLinear(eqx.Module):
         rank = max(1, int(full_rank * rank_ratio))
         Rank = hax.Axis("rank", rank)
         
+        U_arr = U_arr[:, :rank]     # [out_size, rank]
+        S_arr = S_arr[:rank]        # [rank]
+        Vh_arr = Vh_arr[:rank, :]   # [rank, in_size]
+
+        U_arr, S_arr, Vh_arr = jnp.linalg.svd(weight_matrix, full_matrices=False)
+
+        full_rank = min(in_size, out_size)
+        rank = max(1, int(full_rank * rank_ratio))
+        Rank = hax.Axis("rank", rank)
+
         U_arr = U_arr[:, :rank]
         S_arr_truncated = S_arr[:rank]
         Vh_arr = Vh_arr[:rank, :]
 
-        S_base = hax.NamedArray(S_arr_truncated, axes=(Rank,))
+        s_norm = jnp.linalg.norm(S_arr_truncated)
+        S_arr_normalized = S_arr_truncated / (s_norm + 1e-8)
+
+        S_base = hax.NamedArray(S_arr_normalized, axes=(Rank,))
 
         if isinstance(linear.Out, tuple):
             u_axes = linear.Out + (Rank,)
@@ -229,7 +242,7 @@ class DynamicSVDPolicy(eqx.Module):
         num_layers: int,
         rank_per_layer: dict[str, int],
         task_vector_dim: Axis,
-        hidden_dim_ratio: int = 8,
+        hidden_dim_ratio: int = 4,
         *,
         key: jax.random.PRNGKey,
     ) -> "DynamicSVDPolicy":
@@ -245,12 +258,6 @@ class DynamicSVDPolicy(eqx.Module):
         l1 = hnn.Linear.init(In=task_vector_dim, Out=Hidden, key=k_l1, use_bias=True)
         l2 = hnn.Linear.init(In=Hidden, Out=MlpOutput, key=k_l2, use_bias=True)
         activation = hnn.relu
-
-        # k_l2_w, k_l2_b = jax.random.split(k_l2)
-        # new_weights = hax.random.normal(k_l2_w, l2.weight.axes) * 1e-3
-        # l2 = eqx.tree_at(lambda l: l.weight, l2, new_weights)
-        # if l2.bias is not None:
-        #     l2 = eqx.tree_at(lambda l: l.bias, l2, hax.zeros_like(l2.bias))
 
         policy_net = _PolicyNet(layer1=l1, layer2=l2, act=activation)
 
@@ -282,7 +289,7 @@ class DynamicSVDPolicy(eqx.Module):
             new_axes = (Batch,) + shape_info
 
             center = 1.0
-            span = 1.0
+            span = 0.5
             output_dict[name] = center + span * hax.tanh(hax.named(chunk_reshaped, new_axes))
             
             current_idx += num_elements

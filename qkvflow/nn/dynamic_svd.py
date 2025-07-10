@@ -26,14 +26,14 @@ from .svd_adaptive import AdaptiveMLP, SVDPolicy, SVDLinear, DynamicSVDPolicy
 
 
 class AdaptiveBlock(eqx.Module):
-    """Transformer block with SVD-adaptive MLP, now using residual mixing."""
+    """Transformer block with SVD-adaptive MLP."""
     
     config: Gpt2Config = eqx.field(static=True)
     
     attn_ln: TemporalLayerNorm
     attn: Attention
     mlp_ln: TemporalLayerNorm
-    mlp: "AdaptiveTemporalMLP"
+    mlp: AdaptiveMLP
     resid_dropout: hnn.Dropout
     
     @staticmethod
@@ -45,7 +45,7 @@ class AdaptiveBlock(eqx.Module):
         *, 
         key
     ):
-        k_attn, k_mlp, k_adapt = jrandom.split(key, 3)
+        k_attn, k_mlp, k_adapt, k_gate = jrandom.split(key, 4)
 
         attn_ln = TemporalLayerNorm.init(
             config.Embed,
@@ -77,19 +77,29 @@ class AdaptiveBlock(eqx.Module):
         c_fc_svd = SVDLinear.from_linear(c_fc_t0, rank_ratio, key=k_fc_svd)
         c_proj_svd = SVDLinear.from_linear(c_proj_t0, rank_ratio, key=k_proj_svd)
 
-        adaptive_mlp_svd_part = AdaptiveMLP(c_fc=c_fc_svd, c_proj=c_proj_svd, act=regular_mlp.act)
+        k_gate_fc, k_gate_proj = jrandom.split(k_gate)
+        
+        initial_logit_value = -2.0
+        
+        Scalar = hax.Axis("scalar", 1)
+        gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
+        gate_logit_proj = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
+    
+        adaptive_mlp = AdaptiveMLP(c_fc=c_fc_svd, c_proj=c_proj_svd, act=regular_mlp.act)
 
-        adaptive_temporal_mlp = AdaptiveTemporalMLP(
+        adaptive_mlp = AdaptiveTemporalMLP(
             config=config,
             c_fc_temporal=regular_mlp.c_fc,
             c_proj_temporal=regular_mlp.c_proj,
-            adaptive_mlp=adaptive_mlp_svd_part,
-            act=regular_mlp.act
+            adaptive_mlp=adaptive_mlp,
+            act=regular_mlp.act,
+            gate_logit_fc=gate_logit_fc,
+            gate_logit_proj=gate_logit_proj
         )
         
         resid_dropout = hnn.Dropout(pdrop=config.resid_pdrop)
         
-        return AdaptiveBlock(config, attn_ln, attn, mlp_ln, adaptive_temporal_mlp, resid_dropout)
+        return AdaptiveBlock(config, attn_ln, attn, mlp_ln, adaptive_mlp, resid_dropout)
     
     def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key):
         k1, k2, k3, k4 = maybe_rng_split(key, 4)
@@ -120,7 +130,8 @@ class AdaptiveTemporalMLP(eqx.Module):
     c_proj_temporal: TemporalLinear
     adaptive_mlp: AdaptiveMLP
     act: Callable = eqx.field(static=True)
-    
+    gate_logit_fc: hax.NamedArray
+    gate_logit_proj: hax.NamedArray
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
@@ -138,23 +149,32 @@ class AdaptiveTemporalMLP(eqx.Module):
         b_fc_svd = self.adaptive_mlp.c_fc.bias
         b_proj_svd = self.adaptive_mlp.c_proj.bias
         
-        w_fc_eff = w_fc_temporal + w_fc_svd
-        w_proj_eff = w_proj_temporal + w_proj_svd
+        gate_fc_raw = jnn.sigmoid(self.gate_logit_fc.astype(jnp.float32).array)
+        gate_proj_raw = jnn.sigmoid(self.gate_logit_proj.astype(jnp.float32).array)
 
-        def combine_bias(temporal_bias, svd_bias):
-            if svd_bias is None and temporal_bias is None:
-                return None
+        w_fc_svd_raw = w_fc_svd.array
+        w_fc_temporal_raw = w_fc_temporal.array
+        w_proj_svd_raw = w_proj_svd.array
+        w_proj_temporal_raw = w_proj_temporal.array
 
-            if temporal_bias is not None:
-                temporal_bias = temporal_bias.broadcast_axis(batch_axis)
+        w_fc_svd_raw = jnp.swapaxes(w_fc_svd_raw, -1, -2)
+        w_proj_svd_raw = jnp.swapaxes(w_proj_svd_raw, -1, -2)
+
+        w_fc_eff_raw = gate_fc_raw * w_fc_svd_raw + (1 - gate_fc_raw) * w_fc_temporal_raw
+        w_proj_eff_raw = gate_proj_raw * w_proj_svd_raw + (1 - gate_proj_raw) * w_proj_temporal_raw
+
+        w_fc_eff = hax.named(w_fc_eff_raw, w_fc_temporal.axes)
+        w_proj_eff = hax.named(w_proj_eff_raw, w_proj_temporal.axes)
+
+        b_fc_eff = b_fc_svd
+        if b_fc_temporal is not None:
+            b_fc_temporal = b_fc_temporal.broadcast_axis(batch_axis)
+            b_fc_eff = b_fc_temporal if b_fc_eff is None else b_fc_eff + b_fc_temporal
             
-            if svd_bias is not None and temporal_bias is not None:
-                return svd_bias + temporal_bias
-            
-            return svd_bias if svd_bias is not None else temporal_bias
-
-        b_fc_eff = combine_bias(b_fc_temporal, b_fc_svd)
-        b_proj_eff = combine_bias(b_proj_temporal, b_proj_svd)
+        b_proj_eff = b_proj_svd
+        if b_proj_temporal is not None:
+            b_proj_temporal = b_proj_temporal.broadcast_axis(batch_axis)
+            b_proj_eff = b_proj_temporal if b_proj_eff is None else b_proj_eff + b_proj_temporal
         
         x = hax.dot(self.adaptive_mlp.c_fc.In, x, w_fc_eff)
         if b_fc_eff is not None:
@@ -277,10 +297,10 @@ class SVDNeuralOdeTransformer(eqx.Module):
         x_final = self.ln_f(x_final)
         return x_final
 
-    # def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
-    #     params = eqx.filter(self.policy.policy_net, eqx.is_array)
-    #     loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
-    #     return loss * reg_strength
+    def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
+        params = eqx.filter(self.policy.policy_net, eqx.is_array)
+        loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
+        return loss * reg_strength
 
 
 class SVDNeuralOdeLMHeadModel(eqx.Module):
@@ -328,13 +348,13 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
     
     def __call__(
         self, input_ids: NamedArray, attn_mask=None, *, key=None
-    ) -> tuple[NamedArray, NamedArray]:
+    ) -> NamedArray:
         k_embed, k_transformer = maybe_rng_split(key, 2)
         x = self.embeddings.embed(input_ids, key=k_embed)
-        hidden_states = self.transformer(x, attn_mask, key=k_transformer)
-        lm_logits = self.embeddings.unembed(hidden_states)
-
-        return lm_logits, hidden_states
+        x = self.transformer(x, attn_mask, key=k_transformer)
+        lm_logits = self.embeddings.unembed(x)
+        
+        return lm_logits
     
     def compute_loss(
         self,
@@ -345,34 +365,24 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
         reduction_axis: Optional[hax.AxisSelection] = None,
         policy_reg_strength: float = 0.01,
     ) -> NamedArray:
-        logits, hidden_states = self(example.tokens, example.attn_mask, key=key)
-
+        """Compute language modeling loss with policy regularization."""
+        logits = self(example.tokens, example.attn_mask, key=key)
         targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
-
+        
         lm_loss = hnn.cross_entropy_loss(
-            logits, self.Vocab, target_y, reduction, reduction_axis=reduction_axis, where=example.loss_mask
+            logits,
+            self.Vocab,
+            target_y,
+            reduction,
+            reduction_axis=reduction_axis,
+            where=example.loss_mask,
         )
-
-        x_processed = hidden_states
-        task_vector = hax.mean(x_processed, axis="position")
-
-        multipliers = self.transformer.policy(task_vector)
-
-        policy_loss = 0.0
-        num_multipliers = 0
-        for m in multipliers.values():
-            if m is not None:
-                policy_loss += hax.sum((m - 1.0) ** 2).scalar()
-                num_multipliers += m.size
-
-        if num_multipliers > 0:
-            policy_loss = policy_loss / num_multipliers
-
-        total_loss = lm_loss + policy_loss * policy_reg_strength
-
-
-        return total_loss
+        
+        # Add policy regularization
+        policy_loss = self.transformer.get_policy_loss(policy_reg_strength)
+        
+        return lm_loss + policy_loss
     
     @property
     def vocab_size(self) -> int:

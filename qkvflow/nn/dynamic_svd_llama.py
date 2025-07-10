@@ -16,7 +16,7 @@ from haliax import Axis, NamedArray
 from haliax.jax_utils import maybe_rng_split, named_call
 from levanter.models.llama import LlamaConfig
 from levanter.models.lm_model import LmExample
-import wandb
+
 from .dynamic import TemporalLinear, SinusoidalPosEmb, AlternativeTimeEmbeding
 from .dynamic_llama import (
     LlamaAttention, LlamaRMSNorm, LlamaEmbedding, LlamaMlp,
@@ -63,7 +63,7 @@ class LlamaAdaptiveMLP(eqx.Module):
 
 
 class LlamaAdaptiveTemporalMLP(eqx.Module):
-    """Llama MLP with temporal evolution and SVD adaptation combined residually."""
+    """Llama MLP with temporal evolution and SVD adaptation combined additively."""
     
     config: LlamaConfig = eqx.field(static=True)
     gate_proj_temporal: TemporalLinear
@@ -71,19 +71,24 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
     down_proj_temporal: TemporalLinear
     adaptive_mlp: LlamaAdaptiveMLP
     act: Callable = eqx.field(static=True)
+    gate_logit_gate: hax.NamedArray
+    gate_logit_up: hax.NamedArray
+    gate_logit_down: hax.NamedArray
     
     @named_call
     def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
+        # Get temporal weight and bias components
         w_gate_temporal, b_gate_temporal = self.gate_proj_temporal.evaluate_at_components(time_embed)
         w_up_temporal, b_up_temporal = self.up_proj_temporal.evaluate_at_components(time_embed)
         w_down_temporal, b_down_temporal = self.down_proj_temporal.evaluate_at_components(time_embed)
-
+        
         batch_axis = multipliers['gate_proj'].axes[0]
-
+ 
         w_gate_temporal = w_gate_temporal.broadcast_axis(batch_axis)
         w_up_temporal = w_up_temporal.broadcast_axis(batch_axis)
         w_down_temporal = w_down_temporal.broadcast_axis(batch_axis)
-
+        
+        # Get SVD weight and bias components  
         w_gate_svd = self.adaptive_mlp.gate_proj.get_effective_weight(s_multiplier=multipliers['gate_proj'])
         b_gate_svd = self.adaptive_mlp.gate_proj.bias
         w_up_svd = self.adaptive_mlp.up_proj.get_effective_weight(s_multiplier=multipliers['up_proj'])
@@ -91,46 +96,56 @@ class LlamaAdaptiveTemporalMLP(eqx.Module):
         w_down_svd = self.adaptive_mlp.down_proj.get_effective_weight(s_multiplier=multipliers['down_proj'])
         b_down_svd = self.adaptive_mlp.down_proj.bias
 
-        w_gate_eff = w_gate_temporal + w_gate_svd
-        w_up_eff = w_up_temporal + w_up_svd
-        w_down_eff = w_down_temporal + w_down_svd
+        gate_gate_raw = jax.nn.sigmoid(self.gate_logit_gate.astype(jnp.float32).array)
+        gate_up_raw = jax.nn.sigmoid(self.gate_logit_up.astype(jnp.float32).array)
+        gate_down_raw = jax.nn.sigmoid(self.gate_logit_down.astype(jnp.float32).array)
+
+        def combine_weights(gate, w_svd, w_temp):
+            w_svd_raw = jnp.swapaxes(w_svd.array, -1, -2)
+            w_temp_raw = w_temp.array
+            w_eff_raw = gate * w_svd_raw + (1 - gate) * w_temp_raw
+            return hax.named(w_eff_raw, w_temp.axes)
+
+        w_gate_eff = combine_weights(gate_gate_raw, w_gate_svd, w_gate_temporal)
+        w_up_eff = combine_weights(gate_up_raw, w_up_svd, w_up_temporal)
+        w_down_eff = combine_weights(gate_down_raw, w_down_svd, w_down_temporal)
         
         def combine_bias(svd_bias, temp_bias):
             if temp_bias is not None:
                 temp_bias = temp_bias.broadcast_axis(batch_axis)
             if svd_bias is not None and temp_bias is not None:
                 return svd_bias + temp_bias
-            return svd_bias if svd_bias is not None else temp_bias
-
+            elif svd_bias is not None:
+                return svd_bias
+            elif temp_bias is not None:
+                return temp_bias
+            else:
+                return None
+                
         b_gate_eff = combine_bias(b_gate_svd, b_gate_temporal)
         b_up_eff = combine_bias(b_up_svd, b_up_temporal)
         b_down_eff = combine_bias(b_down_svd, b_down_temporal)
-
+        
+        # SwiGLU forward pass with effective weights
         gate = hax.dot(self.adaptive_mlp.gate_proj.In, x, w_gate_eff)
-        if b_gate_eff is not None: gate = gate + b_gate_eff
+        if b_gate_eff is not None:
+            gate = gate + b_gate_eff
         gate = self.act(gate)
-
+        
         up = hax.dot(self.adaptive_mlp.up_proj.In, x, w_up_eff) 
-        if b_up_eff is not None: up = up + b_up_eff
-
+        if b_up_eff is not None:
+            up = up + b_up_eff
+            
         hidden = gate * up
-
+        
         output = hax.dot(self.adaptive_mlp.down_proj.In, hidden, w_down_eff)
-        if b_down_eff is not None: output = output + b_down_eff
-
+        if b_down_eff is not None:
+            output = output + b_down_eff
+            
         return output
 
 
 class LlamaAdaptiveBlock(eqx.Module):
-    """Llama transformer block with SVD-adaptive MLP and temporal evolution."""
-    
-    config: LlamaConfig = eqx.field(static=True)
-    
-    self_attn: LlamaAttention
-    mlp: LlamaAdaptiveTemporalMLP
-    input_layernorm: LlamaRMSNorm
-    post_attention_layernorm: LlamaRMSNorm
-    
     @staticmethod
     def init(
         config: LlamaConfig, 
@@ -140,10 +155,10 @@ class LlamaAdaptiveBlock(eqx.Module):
         *, 
         key
     ):
-        k_attn, k_mlp, k_adapt, ln_1_key, ln_2_key = jrandom.split(key, 5)
+        k_attn, k_mlp, k_adapt, k_gate, ln_1_key, ln_2_key = jrandom.split(key, 6)
 
         self_attn = LlamaAttention.init(config, SinusodialDim, TembedDim, key=k_attn)
-
+        
         regular_mlp = LlamaMlp.init(
             SinusodialDim, TembedDim, config.Embed, config.Mlp, 
             config.activation_function, key=k_mlp, use_bias=config.use_bias
@@ -151,22 +166,26 @@ class LlamaAdaptiveBlock(eqx.Module):
 
         adaptive_mlp = LlamaAdaptiveMLP.from_mlp(regular_mlp, rank_ratio, key=k_adapt)
 
+        initial_logit_value = -2.0 
+        gate_logit_gate = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
+        gate_logit_up = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
+        gate_logit_down = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
+
         adaptive_temporal_mlp = LlamaAdaptiveTemporalMLP(
             config=config,
             gate_proj_temporal=regular_mlp.gate_proj,
             up_proj_temporal=regular_mlp.up_proj,
             down_proj_temporal=regular_mlp.down_proj,
             adaptive_mlp=adaptive_mlp,
-            act=regular_mlp.act
+            act=regular_mlp.act,
+            gate_logit_gate=gate_logit_gate,
+            gate_logit_up=gate_logit_up,
+            gate_logit_down=gate_logit_down
         )
-
-        input_layernorm = LlamaRMSNorm.init(
-            config.Embed, SinusodialDim=SinusodialDim, TembedDim=TembedDim, key=ln_1_key
-        )
-        post_attention_layernorm = LlamaRMSNorm.init(
-            config.Embed, SinusodialDim=SinusodialDim, TembedDim=TembedDim, key=ln_2_key
-        )
-
+        
+        input_layernorm = LlamaRMSNorm.init(...)
+        post_attention_layernorm = LlamaRMSNorm.init(...)
+        
         return LlamaAdaptiveBlock(config, self_attn, adaptive_temporal_mlp, input_layernorm, post_attention_layernorm)
     
     def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key):
@@ -253,43 +272,53 @@ class SVDLlamaOdeTransformer(eqx.Module):
         )
     
     def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
-        # Calculate task vector for SVD policy  
-        task_vector = hax.named(jnp.mean(x.array, axis=1), (x.axes[0], x.axes[2]))
-        multipliers = self.policy(task_vector)
-
-        # Time evolution setup
         t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
         dts = hax.ones((self.config.Layers,), dtype=x.dtype) * self.dt
         time_embed = self.time_embedding(t)
         keys = maybe_rng_split(key, self.config.num_layers) if key is not None else [None] * self.config.num_layers
 
-        def make_do_block(layer_idx, layer_key):
+        num_warmup_layers = min(3, self.config.num_layers // 4)
+
+        def make_do_block(layer_idx, layer_key, current_multipliers):
             def do_block(x_in):
                 layer_multipliers = {
-                    "gate_proj": multipliers.get(f"layer_{layer_idx}_gate_proj"),
-                    "up_proj": multipliers.get(f"layer_{layer_idx}_up_proj"),
-                    "down_proj": multipliers.get(f"layer_{layer_idx}_down_proj"),
+                    "gate_proj": current_multipliers.get(f"layer_{layer_idx}_gate_proj"),
+                    "up_proj": current_multipliers.get(f"layer_{layer_idx}_up_proj"),
+                    "down_proj": current_multipliers.get(f"layer_{layer_idx}_down_proj"),
                 }
                 
                 output = self.block(
-                    time_embed.take("layers", layer_idx), 
-                    x_in, 
-                    attn_mask, 
-                    layer_idx, 
-                    multipliers=layer_multipliers, 
-                    key=layer_key
+                    time_embed.take("layers", layer_idx), x_in, attn_mask, 
+                    layer_idx, multipliers=layer_multipliers, key=layer_key
                 )
                 return x_in + output * dts.take("layers", layer_idx)
             return do_block
-        
+
+        Batch = x.axes[0]
+        identity_multipliers = {}
         for i in range(self.config.num_layers):
-            do_block = make_do_block(i, keys[i])
-            x = jax.checkpoint(do_block, prevent_cse=False)(x)
+            for proj in ["gate_proj", "up_proj", "down_proj"]:
+                param_key = f"layer_{i}_{proj}"
+                if param_key in self.policy.rank_shapes:
+                    rank_axis = self.policy.rank_shapes[param_key][0]
+                    identity_multipliers[param_key] = hax.ones((Batch, rank_axis))
+
+        x_processed = x
+        for i in range(num_warmup_layers):
+            do_block_warmup = make_do_block(i, keys[i], identity_multipliers)
+            x_processed = jax.checkpoint(do_block_warmup, prevent_cse=False)(x_processed)
+
+        task_vector = hax.mean(x_processed, axis="position")
+        adaptive_multipliers = self.policy(task_vector)
+
+        x_final = x_processed
+        for i in range(num_warmup_layers, self.config.num_layers):
+            do_block_adaptive = make_do_block(i, keys[i], adaptive_multipliers)
+            x_final = jax.checkpoint(do_block_adaptive, prevent_cse=False)(x_final)
         
-        # Final layer norm (temporal)
-        final_time_embed = time_embed.take("layers", -1)  # Use last time step
-        x = self.norm(final_time_embed, x)
-        return x
+        final_time_embed = time_embed.take("layers", -1)
+        x_final = self.norm(final_time_embed, x_final)
+        return x_final
 
     def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
         """Policy regularization loss."""
@@ -345,12 +374,12 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
     
     def __call__(
         self, input_ids: NamedArray, attn_mask=None, *, key=None
-    ) -> tuple[NamedArray, NamedArray]:
+    ) -> NamedArray:
         x = self.embeddings.embed(input_ids)
-        hidden_states = self.transformer(x, attn_mask, key=key)
-        lm_logits = self.lm_head(hidden_states)
-
-        return lm_logits, hidden_states
+        x = self.transformer(x, attn_mask, key=key)
+        lm_logits = self.lm_head(x)
+        
+        return lm_logits
     
     def compute_loss(
         self,
@@ -361,32 +390,25 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
         reduction_axis: Optional[hax.AxisSelection] = None,
         policy_reg_strength: float = 0.01,
     ) -> NamedArray:
-        logits, hidden_states = self(example.tokens, example.attn_mask, key=key)
-
+        """Compute language modeling loss with policy regularization."""
+        logits = self(example.tokens, example.attn_mask, key=key)
         targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
-
-        lm_loss = hnn.cross_entropy_loss(
-            logits, self.Vocab, target_y, reduction, reduction_axis=reduction_axis, where=example.loss_mask
-        )
-
-        task_vector = hax.mean(hidden_states, axis="position")
-        multipliers = self.transformer.policy(task_vector)
-
-        policy_loss = 0.0
-        num_multipliers = 0
-        for m in multipliers.values():
-            if m is not None:
-                policy_loss += hax.sum((m - 1.0) ** 2).scalar()
-                num_multipliers += m.size
-
-        if num_multipliers > 0:
-            policy_loss = policy_loss / num_multipliers
-
-        total_loss = lm_loss + policy_loss * policy_reg_strength
-
-        return total_loss
         
+        lm_loss = hnn.cross_entropy_loss(
+            logits,
+            self.Vocab,
+            target_y,
+            reduction,
+            reduction_axis=reduction_axis,
+            where=example.loss_mask,
+        )
+        
+        # Add policy regularization
+        policy_loss = self.transformer.get_policy_loss(policy_reg_strength)
+        
+        return lm_loss + policy_loss
+    
     @property
     def vocab_size(self) -> int:
         return self.Vocab.size

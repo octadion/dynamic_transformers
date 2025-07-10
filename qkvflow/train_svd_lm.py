@@ -128,11 +128,14 @@ def main(config: TrainSVDLmConfig):
     parameter_axis_mapping = config.trainer.parameter_axis_mapping
     
     def compute_loss(model: LmHeadModel, example: LmExample, key=None):
-        return model.compute_loss(
-            example, 
-            key=key, 
-            policy_reg_strength=config.svd_config.policy_reg_strength
-        ).scalar()
+        if hasattr(model, 'compute_loss') and hasattr(model.compute_loss, '__code__'):
+            if 'policy_reg_strength' in model.compute_loss.__code__.co_varnames:
+                return model.compute_loss(
+                    example, 
+                    key=key, 
+                    policy_reg_strength=config.svd_config.policy_reg_strength
+                ).scalar()
+        return model.compute_loss(example, key=key).scalar()
     
     if config.model_choice == "neuralode-svd":
         from dataclasses import replace

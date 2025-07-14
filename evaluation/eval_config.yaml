@@ -1,27 +1,43 @@
 model_checkpoints:
   - name: "GPT2 SVD Neural ODE"
-    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/smpc9hx5"
+    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/wbgh5v26"
     config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano.yaml"
 
-  # - name: "Llama SVD Neural ODE"
-  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_svd_checkpoints/m8zp9g3g"
-  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_llama_nano.yaml"
+  - name: "Llama SVD Neural ODE"
+    checkpoint_path: "/content/drive/MyDrive/nano_llama_svd_checkpoints/m8zp9g3g"
+    config_path: "/content/dynamic-transformers/config/owt_10k/svd_llama_nano.yaml"
 
-  # - name: "GPT2 Baseline"
-  #   checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
-  #   config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
+  - name: "GPT2 Baseline"
+    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
+    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
 
-  # - name: "Llama Baseline"
-  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
-  #   config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
+  - name: "Llama Baseline"
+    checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
+    config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
 
-  # - name: "GPT2 Neural ODE"
-  #   checkpoint_path: "/content/drive/MyDrive/neural_ode/neural_ode_checkpoints/gm98wcx5"
-  #   config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_ode_nano.yaml"
+  - name: "GPT2 Neural ODE"
+    checkpoint_path: "/content/drive/MyDrive/neural_ode/neural_ode_checkpoints/gm98wcx5"
+    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_ode_nano.yaml"
 
-  # - name: "Llama Neural ODE"
-  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_neuralode_checkpoints/wh1ckolb"
-  #   config_path: "/content/dynamic-transformers/config/owt_10k/llama_ode_nano.yaml"
+  - name: "Llama Neural ODE"
+    checkpoint_path: "/content/drive/MyDrive/nano_llama_neuralode_checkpoints/wh1ckolb"
+    config_path: "/content/dynamic-transformers/config/owt_10k/llama_ode_nano.yaml"
+
+  - name: "GPT2 LoRA (Winogrande)"
+    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/gpt2_winogrande_merged"
+    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
+
+  - name: "Llama LoRA (Winogrande)"
+    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/llama_winogrande_merged"
+    config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
+
+  - name: "GPT2 LoRA (SciQ)"
+    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/gpt2_sciq_merged"
+    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
+
+  - name: "Llama LoRA (SciQ)"
+    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/llama_sciq_merged"
+    config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
     
   
 
@@ -45,8 +61,8 @@ datasets:
     
   - name: "Winogrande"
     dataset_name: "winogrande"
-    dataset_config: "winogrande_xs"
-    split: "validation"
+    dataset_config: "winogrande_xl"
+    split: "test"
     num_samples: null
 
 evaluation:
@@ -54,6 +70,6 @@ evaluation:
   max_seq_length: 512
   few_shot_k: 0
   seed: 42
-  output_dir: "/content/drive/MyDrive/evaluation_results"
+  output_dir: "/content/drive/MyDrive/evaluation_results_winogrande"
   save_individual_predictions: false
   clear_cache_between_models: true

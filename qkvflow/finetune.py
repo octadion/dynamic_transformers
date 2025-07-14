@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-
+import os
 import jax
 import jax.random as jrandom
 import levanter
@@ -10,14 +10,29 @@ from levanter import callbacks
 from levanter.checkpoint import load_checkpoint
 from levanter.data.text import CausalLmDataset
 from levanter.models.gpt2 import Gpt2Embeddings
+from levanter.models.llama import LlamaLMHeadModel
+from qkvflow.nn.dynamic_llama import LlamaEmbedding
 from levanter.models.lm_model import LmExample, LmHeadModel
 from levanter.trainer import Trainer, TrainerConfig
 from levanter.utils.jax_utils import parameter_count
 from levanter.utils.tree_utils import inference_mode
+import levanter.tensorstore_serialization as ts_ser
+import tensorstore as ts
+from typing import Any, Dict
+
+async def _patched_load_array_from_tensorstore(spec: Dict[str, Any]) -> jax.Array:
+    context = ts.Context()
+    t = await ts.open(ts.Spec(spec), context=context)
+    
+    return await t.read(order='C')
+
+ts_ser.load_array_from_tensorstore = _patched_load_array_from_tensorstore
+
+print("INFO: TensorStore monkey patch v2 applied successfully.")
 
 import wandb
 from qkvflow.lora import is_lora_param, LoraConfig, loraize
-from qkvflow.nn.dynamic_cp_v4 import NeuralOdeLMHeadModel
+from qkvflow.nn.dynamic import NeuralOdeLMHeadModel
 from qkvflow.train_lm import (
     DatasetConfig,
     OptimizerConfigWithWeightDecay,
@@ -198,6 +213,8 @@ def main(config: FinetuneLmConfig):
                 )
             elif pretrain_config.model_choice == "gpt2":
                 return pretrain_config.model.build(Vocab, key=model_key)
+            elif pretrain_config.model_choice == "llama":
+                return LlamaLMHeadModel.init(Vocab, config=pretrain_config.model, key=model_key)
             else:
                 raise ValueError(
                     f"Unknown model choice : {pretrain_config.model_choice}"
@@ -206,8 +223,14 @@ def main(config: FinetuneLmConfig):
         logger.info(f" ---> Selected model: \t {pretrain_config.model_choice}")
         model = model_init()
 
+        checkpoint_base_path = pretrain_config.trainer.checkpointer.base_path
+        checkpoint_id = pretrain_config.trainer.id
+        full_checkpoint_path = os.path.join(checkpoint_base_path, checkpoint_id)
+
+        print(f"INFO :: Loading pretrained model from: {full_checkpoint_path}")
+
         model, *_ = load_checkpoint(
-            model, None, f"checkpoints/{pretrain_config.trainer.id}"
+            model, None, full_checkpoint_path
         )
 
         if pretrain_config.model_choice == "neuralode":
@@ -224,7 +247,8 @@ def main(config: FinetuneLmConfig):
 
             def filter_spec(node):
                 # finetune both GPT2 embedding and LoRA
-                return isinstance(node, Gpt2Embeddings) or is_lora_param(node)
+                is_embedding = isinstance(node, (Gpt2Embeddings, LlamaEmbedding))
+                return is_embedding or is_lora_param(node)
 
             param_filter = jax.tree_util.tree_map(
                 filter_spec, model, is_leaf=filter_spec

@@ -183,7 +183,7 @@ class MultipleChoiceEvaluator:
             attn_mask = hax.named(jnp.array(inputs['attention_mask']), (Batch, Pos))
             loss_mask_ax = hax.named(loss_masks, (Batch, Pos))
             
-            logits, _ = model(tokens, attn_mask)
+            logits = model(tokens, attn_mask)
             Vocab = logits.axes[-1]
 
             target_y = hax.nn.one_hot(hax.named(labels, tokens.axes), Vocab, dtype=logits.dtype)

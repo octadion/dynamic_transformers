@@ -16,7 +16,7 @@ class DatasetInspector:
             "piqa": {"name": "piqa", "has_context": False},
             "arc_easy": {"name": "ai2_arc", "config": "ARC-Easy", "has_context": False},
             "sciq": {"name": "sciq", "has_context": True},
-            "winogrande": {"name": "winogrande", "config": "winogrande_xs", "has_context": False},
+            "winogrande": {"name": "winogrande", "config": "winogrande_xl", "has_context": False},
             "hellaswag": {"name": "hellaswag", "has_context": True}
         }
 

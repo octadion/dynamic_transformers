@@ -1,0 +1,63 @@
+mode: finetune
+finetune_choice: lora
+
+pretrain_config:
+  model_choice: gpt2
+  data: 
+    id: "Ankursingh/openwebtext_10K"
+    cache_dir: "/content/cache"
+    tokenizer: "gpt2"
+  model:
+    type: gpt2
+    hidden_dim: 576
+    num_heads: 12
+    num_layers: 12
+    seq_len: 512
+    embed_pdrop: 0.1
+    resid_pdrop: 0.1
+    attn_pdrop: 0.1
+  trainer:
+    id: "u4c2ysp0" 
+    checkpointer:
+      base_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/"
+  optimizer:
+    learning_rate: 4E-4
+    weight_decay: 0.08
+
+finetune_data:
+  id: "winogrande"           
+  name: "winogrande_xl"      
+  cache_dir: "/content/cache/winogrande_gpt2"
+  tokenizer: "gpt2"   
+  text_key: 'sentence'   
+
+finetuner:
+  wandb:
+    name: "nano_gpt2_lora_on_winogrande"
+    project: "qkvflow"
+    tags: ["finetune", "lora", "winogrande", "gpt2"]
+  
+  mp: p=f32,c=bfloat16
+  train_batch_size: 8
+  num_train_steps: 3001
+  steps_per_eval: 100
+  
+  checkpointer: 
+    save_interval: 15min
+    keep:
+      - every: 500
+        until: 3001
+    base_path: "/content/drive/MyDrive/lora_finetuned_checkpoints_gpt2_winogrande/"
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules:
+    - "c_attn"
+    - "c_proj"
+    - "c_fc"
+
+lora_optimizer:
+  learning_rate: 3.0e-4
+  weight_decay: 0.01

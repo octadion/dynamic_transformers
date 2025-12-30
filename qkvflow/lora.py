@@ -103,12 +103,12 @@ class LowRankLinear(eqx.Module):
         # Peft always uses out_first=True (i.e. normal Torch convention) for linear, even for gpt2-style Conv1d
 
         # small modification
-        weight_A = 1e-6 * hax.random.normal(
+        weight_A = 0.01 * hax.random.normal(
             key=key_A,
             shape=hax.concat_axis_specs(In, _R),
         )
         lora_A = hnn.Linear(weight=weight_A, bias=None, In=In, Out=_R)
-        weight_B = 1e-6 * hax.random.normal(
+        weight_B = 0.01 * hax.random.normal(
             key=key_B,
             shape=hax.concat_axis_specs(_R, Out),
         )

@@ -72,23 +72,41 @@ class DatasetConfig(LMDatasetConfig):
 
     val_ratio: float = 0.0005
 
+    def _format_arc(self, example):
+        question = example["question"]
+        choices = example["choices"]["text"]
+        answer_key = example["answerKey"]
+        
+        prompt = f"Question: {question}\n"
+        labels = [chr(ord('A') + i) for i in range(len(choices))]
+        for label, choice in zip(labels, choices):
+            prompt += f"{label}. {choice}\n"
+        prompt += f"Answer: {answer_key}"
+        return {"text": prompt}
+
     def get_shard_source(self, split) -> ShardedDataset[str]:
         if self.id is not None:
             hf_dataset = HFDataset(
                 self.id,
                 split=split,
-                val_ratio=self.val_ratio,
                 name=self.name,
                 streaming=self.stream,
+                val_ratio=self.val_ratio
             )
-            return hf_dataset.map(lambda x: x[self.text_key])
+            
+            if self.id == "ai2_arc":
+                formatter = self._format_arc
+                return hf_dataset.map(formatter).map(lambda x: x['text'])
+            else:
+                formatter = lambda x: x[self.text_key]
+                return hf_dataset.map(formatter)
         else:
             return TextUrlDataset(self.urls_for_split(split), self.text_key)
 
 
 @dataclass
 class OptimizerConfigWithWeightDecay(OptimizerConfig):
-
+    policy_lr: Optional[float] = None
     weight_decay_modules: Optional[Union[List[str], str]] = None
 
     def build(self, num_train_steps: int) -> GradientTransformation:

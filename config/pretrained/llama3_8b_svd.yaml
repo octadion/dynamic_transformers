@@ -1,0 +1,70 @@
+# config/pretrained/llama3_8b_svd.yaml
+# Training config for SVD Llama-3.1-8B with FROZEN pretrained backbone
+
+# Pretrained model settings
+pretrained_model_name: "meta-llama/Llama-3.1-8B"
+pretrained_cache_dir: "/content/cache/hf_models"
+freeze_backbone: true
+train_policy_only: true
+train_svd_from_scratch: false
+
+# SVD configuration
+svd_config:
+  rank_ratio: 0.5  # Keep 50% of singular values
+  policy_init_scale: 0.1
+  policy_reg_strength: 0.001  # L2 regularization on policy
+
+# Data configuration
+data:
+  id: "Ankursingh/openwebtext_10K"
+  cache_dir: "/content/cache"
+  tokenizer: "meta-llama/Llama-3.1-8B"
+  stream: false
+  val_ratio: 0.0005
+
+# Model configuration (matches Llama-3.1-8B)
+model:
+  type: llama
+  hidden_dim: 4096
+  intermediate_dim: 14336  # 3.5x hidden_dim
+  num_heads: 32
+  num_kv_heads: 8  # GQA
+  num_layers: 32
+  seq_len: 512  # Training sequence length
+
+# Trainer configuration
+trainer:
+  wandb:
+    name: "llama3_8b_svd_pretrained"
+    project: "qkvflow-pretrained"
+    tags: ["pretrained", "llama3.1", "svd", "frozen-backbone"]
+  
+  mp: p=f32,c=bfloat16
+  train_batch_size: 8
+  num_train_steps: 10000  # Fewer steps needed (policy only)
+  steps_per_eval: 100
+  
+  tensor_parallel_axes: ["mlp", "heads"]
+  fsdp_axis: "embed"
+  batch_axis: "batch"
+  
+  checkpointer:
+    save_interval: 30min
+    keep:
+      - every: 1000
+        until: 10000
+    base_path: "/content/drive/MyDrive/llama3_svd_pretrained/"
+
+# Optimizer (for policy only)
+optimizer:
+  learning_rate: 1.0e-3  # Higher LR for policy-only training
+  weight_decay: 0.01
+  weight_decay_modules: "policy\\.policy_net.*"
+  min_lr_ratio: 0.1
+  beta1: 0.9
+  beta2: 0.999
+
+# Neural ODE settings
+model_choice: "llamaode-svd"
+time_embed_dim: 100
+sinusodial_dim: 96

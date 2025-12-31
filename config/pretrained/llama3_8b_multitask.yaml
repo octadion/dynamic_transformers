@@ -1,8 +1,11 @@
 data:
   cache_dir: /content/cache
   id: Ankursingh/openwebtext_10K
+  stream: false
   tokenizer: meta-llama/Llama-3.1-8B
+  val_ratio: 0.0005
 freeze_backbone: true
+log_task_every: 50
 log_task_performance: true
 model:
   hidden_dim: 4096
@@ -26,6 +29,9 @@ multi_task:
     piqa: 1.0
     sciq: 1.0
     winogrande: 1.0
+optimizer:
+  learning_rate: 0.0005
+  weight_decay: 0.01
 pretrained_cache_dir: /content/cache/hf_models
 pretrained_model_name: meta-llama/Llama-3.1-8B
 sinusodial_dim: 96

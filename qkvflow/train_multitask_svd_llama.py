@@ -50,6 +50,12 @@ class MultiTaskTrainingConfig:
     pretrained_model_name: str = "meta-llama/Meta-Llama-3-8B"
     log_task_performance: bool = True
     log_task_every: int = 100
+    
+    model_choice: str = "llamaode-svd"
+    pretrained_cache_dir: Optional[str] = None
+    sinusodial_dim: int = 96
+    task_batch_mixing: str = "random"
+    time_embed_dim: int = 100
 
 class MultiTaskTrainer:
     def __init__(self, config, trainer, dataset):
@@ -99,9 +105,9 @@ def main(config: MultiTaskTrainingConfig):
     config.trainer.initialize(config)
     seed = config.trainer.seed
     model_key, train_key = jrandom.split(jrandom.PRNGKey(seed), 2)
-    
-    # Custom Optimizer (Adafactor)
+
     optimizer = build_memory_efficient_optimizer(learning_rate=5e-4)
+    
     dataset = MultiTaskDataset(tokenizer, config.multi_task)
     if not hasattr(config.model, 'Pos'): config.model.Pos = Axis("position", config.model.seq_len)
     Pos = config.model.Pos

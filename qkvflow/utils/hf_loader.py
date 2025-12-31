@@ -15,7 +15,6 @@ def load_llama_from_hf(model_name: str, cache_dir: Optional[str] = None, torch_d
     config = AutoConfig.from_pretrained(model_name, token=token, cache_dir=cache_dir)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
-    # Force CPU load first to save GPU RAM for JAX
     try:
         pt_model = AutoModelForCausalLM.from_pretrained(
             model_name, config=config, cache_dir=cache_dir, token=token,

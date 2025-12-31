@@ -1,0 +1,71 @@
+mode: finetune
+finetune_choice: lora
+
+pretrain_config:
+  model_choice: gpt2
+
+  data: 
+    id: "Ankursingh/openwebtext_10K" 
+    cache_dir: "/content/cache"
+    tokenizer: "gpt2"
+    stream: false
+
+  model:
+    type: gpt2
+    hidden_dim: 576
+    num_heads: 12
+    num_layers: 12
+    seq_len: 512
+    embed_pdrop: 0.1
+    resid_pdrop: 0.1
+    attn_pdrop: 0.1
+
+  trainer:
+    id: "u4c2ysp0"
+    wandb:
+      name: "nano_gpt2"
+      project: "qkvflow"
+    checkpointer:
+      base_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/"
+  
+  optimizer:
+    learning_rate: 4E-4
+    weight_decay: 0.08
+    min_lr_ratio: 0.1
+
+finetune_data:
+  id: "ai2_arc"   
+  name: "ARC-Easy"   
+  cache_dir: "/content/cache/arc_gpt2"
+  tokenizer: "gpt2"
+
+finetuner:
+  wandb:
+    name: "nano_gpt2_lora_on_arc"
+    project: "qkvflow"
+    tags: ["finetune", "lora", "arc-easy", "gpt2"]
+  
+  mp: p=f32,c=bfloat16
+  train_batch_size: 8
+  num_train_steps: 3001
+  steps_per_eval: 50
+  
+  checkpointer: 
+    save_interval: 10min
+    keep:
+      - every: 500
+        until: 3001
+    base_path: "/content/drive/MyDrive/lora_finetuned_checkpoints_gpt2/"
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules:
+    - "c_attn"
+    - "c_proj"
+    - "c_fc"
+
+lora_optimizer:
+  learning_rate: 3.0e-4
+  weight_decay: 0.01

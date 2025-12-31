@@ -242,7 +242,7 @@ class DynamicSVDPolicy(eqx.Module):
         num_layers: int,
         rank_per_layer: dict[str, int],
         task_vector_dim: Axis,
-        hidden_dim_ratio: int = 4,
+        hidden_dim_ratio: float = 4.0,
         *,
         key: jax.random.PRNGKey,
     ) -> "DynamicSVDPolicy":
@@ -251,15 +251,27 @@ class DynamicSVDPolicy(eqx.Module):
         total_multipliers = sum(rank_per_layer.values())
         MlpOutput = hax.Axis("MlpOutput", total_multipliers)
 
-        Hidden = hax.Axis("PolicyHidden", task_vector_dim.size * hidden_dim_ratio)
+        if hidden_dim_ratio > 0:
+            hidden_dim = int(task_vector_dim.size * hidden_dim_ratio)
+            if hidden_dim == 0: hidden_dim = 1
+            
+            Hidden = hax.Axis("PolicyHidden", hidden_dim)
+            k_l1, k_l2 = jrandom.split(key)
 
-        k_l1, k_l2 = jrandom.split(key)
+            l1 = hnn.Linear.init(In=task_vector_dim, Out=Hidden, key=k_l1, use_bias=True)
+            l2 = hnn.Linear.init(In=Hidden, Out=MlpOutput, key=k_l2, use_bias=True)
+            activation = hnn.relu
+            
+            policy_net = _PolicyNet(layer1=l1, layer2=l2, act=activation)
+        else:
+            k_linear = key
 
-        l1 = hnn.Linear.init(In=task_vector_dim, Out=Hidden, key=k_l1, use_bias=True)
-        l2 = hnn.Linear.init(In=Hidden, Out=MlpOutput, key=k_l2, use_bias=True)
-        activation = hnn.relu
+            l1 = hnn.Linear.init(In=task_vector_dim, Out=MlpOutput, key=k_linear, use_bias=True)
 
-        policy_net = _PolicyNet(layer1=l1, layer2=l2, act=activation)
+            l2 = lambda x: x
+            activation = lambda x: x
+            
+            policy_net = _PolicyNet(layer1=l1, layer2=l2, act=activation)
 
         param_names = sorted(rank_per_layer.keys())
         rank_shapes = {name: (hax.Axis("rank", rank_per_layer[name]),) for name in param_names}

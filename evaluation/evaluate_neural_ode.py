@@ -18,12 +18,15 @@ from haliax import Axis
 import levanter.config
 from levanter.trainer import Trainer
 from levanter.utils.tree_utils import inference_mode
+from levanter.checkpoint import load_checkpoint
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import draccus
 from datasets import load_dataset
 from draccus import field
-
+from draccus.parsers import decoding
+from qkvflow.lora import loraize, is_lora_param
 from qkvflow.train_lm import TrainLmConfig
 from levanter.models.gpt2 import Gpt2LMHeadModel
 from levanter.models.llama import LlamaLMHeadModel as LevanterLlamaLMHeadModel
@@ -32,6 +35,8 @@ from qkvflow.nn.dynamic import NeuralOdeLMHeadModel
 from qkvflow.nn.dynamic_llama import LlamaLMHeadModel as LlamaODELMHeadModel
 from qkvflow.nn.dynamic_svd import SVDNeuralOdeLMHeadModel
 from qkvflow.nn.dynamic_svd_llama import SVDLlamaOdeLMHeadModel
+from qkvflow.finetune import FinetuneLmConfig
+from qkvflow.lora import loraize
 
 logger = logging.getLogger(__name__)
 
@@ -75,32 +80,57 @@ def get_model_for_eval(config: EvalTrainConfig):
     return trainer, state.model, None, tokenizer
 
 def load_model_from_levanter_config(checkpoint_config: "ModelCheckpointConfig"):
-    logger.info(f"Loading model '{checkpoint_config.name}' via Levanter...")
-    logger.info(f"  - Training Config: {checkpoint_config.config_path}")
-    logger.info(f"  - Checkpoint: {checkpoint_config.checkpoint_path}")
+    logger.info(f"Loading UN-MERGED LoRA model '{checkpoint_config.name}' with final method...")
 
-    loaded_components = levanter.config.main(
-        get_model_for_eval,
-        args=[
-            "--config_path", checkpoint_config.config_path,
-            "--trainer.load_checkpoint_path", checkpoint_config.checkpoint_path,
-            "--trainer.wandb.mode", "disabled",
-            "--trainer.id", f"eval-{checkpoint_config.name.replace(' ', '-')}",
-        ],
-    )()
-
-    model, tokenizer = loaded_components[1], loaded_components[3]
-    if model is None or tokenizer is None: raise RuntimeError(f"Failed to load model '{checkpoint_config.name}'.")
+    with open(checkpoint_config.config_path, "r") as f:
+        config_dict = yaml.safe_load(f)
+    config: FinetuneLmConfig = decoding.decode(FinetuneLmConfig, config_dict)
+    
+    pretrain_config = config.pretrain_config
+    lora_config = config.lora
+    tokenizer = pretrain_config.data.the_tokenizer
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
-    logger.info(f"Model '{checkpoint_config.name}' loaded successfully.")
-    return inference_mode(model, True), tokenizer
 
+    logger.info("Step 1: Initializing and loading base vanilla model...")
+    Vocab = round_axis_for_partitioning(Axis("vocab", len(tokenizer)), pretrain_config.trainer.parameter_axis_mapping)
+    model_key = jax.random.PRNGKey(pretrain_config.trainer.seed)
+    
+    if pretrain_config.model_choice == "gpt2":
+        vanilla_scaffold = Gpt2LMHeadModel.init(Vocab, config=pretrain_config.model, key=model_key)
+    elif pretrain_config.model_choice == "llama":
+        vanilla_scaffold = LevanterLlamaLMHeadModel.init(Vocab, config=pretrain_config.model, key=model_key)
+    else:
+        raise NotImplementedError(f"Model type '{pretrain_config.model_choice}' is not supported in this evaluation script.")
+
+    vanilla_model, _, _ = load_checkpoint(
+        vanilla_scaffold, training_state=None, checkpoint_path=checkpoint_config.vanilla_checkpoint_path
+    )
+    if vanilla_model is None:
+        raise RuntimeError(f"Failed to load VANILLA checkpoint from '{checkpoint_config.vanilla_checkpoint_path}'")
+
+    lora_model_structure = loraize(vanilla_model, config=lora_config, key=model_key)
+    
+    logger.info("Step 2: Preparing LoRA-only scaffold...")
+    lora_only_scaffold = eqx.filter(lora_model_structure, is_lora_param, is_leaf=is_lora_param)
+    logger.info(f"Step 3: Loading LoRA weights into the scaffold from {checkpoint_config.lora_checkpoint_path}...")
+    loaded_lora_params, _, _ = load_checkpoint(
+        lora_only_scaffold, training_state=None, checkpoint_path=checkpoint_config.lora_checkpoint_path
+    )
+    if loaded_lora_params is None:
+        raise RuntimeError(f"Failed to load LORA checkpoint from '{checkpoint_config.lora_checkpoint_path}'")
+
+    logger.info("Step 4: Combining vanilla model with loaded LoRA parameters...")
+    final_model = eqx.combine(lora_model_structure, loaded_lora_params)
+
+    logger.info(f"LoRA model '{checkpoint_config.name}' loaded successfully.")
+    return inference_mode(final_model, True), tokenizer
 
 @dataclass
 class ModelCheckpointConfig:
     name: str
-    checkpoint_path: str
     config_path: str
+    lora_checkpoint_path: str 
+    vanilla_checkpoint_path: str
 
 @dataclass
 class EvalDatasetConfig:
@@ -204,12 +234,28 @@ class MultipleChoiceEvaluator:
 
     def evaluate_dataset(self, model: LmHeadModel, dataset_config: EvalDatasetConfig) -> Dict[str, float]:
         logger.info(f"Evaluating on {dataset_config.name}")
-        dataset = load_dataset(
-            dataset_config.dataset_name,
-            name=dataset_config.dataset_config,
-            split=dataset_config.split,
-            verification_mode="no_checks"
-        )
+        path_or_name = dataset_config.dataset_name
+
+        if os.path.isfile(path_or_name):
+            logging.info(f"Loading local data file: {path_or_name}")
+            file_type = os.path.splitext(path_or_name)[1][1:]
+            dataset = load_dataset(file_type, data_files=path_or_name)
+
+            if 'train' in dataset:
+                dataset = dataset['train']
+            else:
+                first_split = next(iter(dataset.keys()))
+                dataset = dataset[first_split]
+
+        else:
+            logging.info(f"Loading dataset from Hub: {path_or_name}")
+            dataset = load_dataset(
+                path_or_name,
+                name=dataset_config.dataset_config,
+                split=dataset_config.split,
+                verification_mode="no_checks"
+            )
+        print(f"INFO: Verifying dataset size. Dataset '{dataset_config.name}' loaded with {len(dataset)} samples.")
         if dataset_config.num_samples: dataset = dataset.select(range(min(dataset_config.num_samples, len(dataset))))
 
         correct = 0; total = 0

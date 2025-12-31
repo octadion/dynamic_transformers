@@ -235,6 +235,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
         sinusodial_dim,
         rank_ratio: float = 0.5,
         policy_init_scale: float = 0.1,
+        policy_hidden_dim_ratio: float = 4.0,
         *,
         key,
     ):
@@ -269,6 +270,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
             num_layers=config.num_layers,
             rank_per_layer=rank_per_layer,
             task_vector_dim=config.Embed,
+            hidden_dim_ratio=policy_hidden_dim_ratio,
             key=k_policy,
         )
         
@@ -313,7 +315,7 @@ class SVDLlamaOdeTransformer(eqx.Module):
             do_block_warmup = make_do_block(i, keys[i], identity_multipliers)
             x_processed = jax.checkpoint(do_block_warmup, prevent_cse=False)(x_processed)
 
-        task_vector = hax.mean(x_processed, axis="position")
+        task_vector = x_processed.take("position", 0)
         adaptive_multipliers = self.policy(task_vector)
 
         x_final = x_processed
@@ -325,10 +327,18 @@ class SVDLlamaOdeTransformer(eqx.Module):
         x_final = self.norm(final_time_embed, x_final)
         return x_final
 
-    def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
-        params = eqx.filter(self.policy.policy_net, eqx.is_array)
-        loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
-        return loss * reg_strength
+    def get_policy_loss(self, activation_strength: float = 0.01) -> jax.Array:
+        params = self.policy.get_policy_params()
+        leaf_arrays = jax.tree_util.tree_leaves(eqx.filter(params, eqx.is_array))
+
+        if not leaf_arrays:
+            return jnp.array(0.0)
+
+        flat_params = jnp.concatenate([jnp.ravel(p.astype(jnp.float32)) for p in leaf_arrays])
+        std_dev = jnp.std(flat_params)
+        activation_loss = 1.0 / (std_dev + 1e-6)
+
+        return activation_loss * activation_strength
 
 
 class SVDLlamaOdeLMHeadModel(eqx.Module):
@@ -359,6 +369,7 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
         sinusodial_dim=16,
         rank_ratio=0.5,
         policy_init_scale=0.1,
+        policy_hidden_dim_ratio=4.0,
         *,
         key,
     ) -> "SVDLlamaOdeLMHeadModel":
@@ -369,6 +380,7 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
             sinusodial_dim=sinusodial_dim,
             rank_ratio=rank_ratio,
             policy_init_scale=policy_init_scale,
+            policy_hidden_dim_ratio=policy_hidden_dim_ratio,
             key=k_t,
         )
         embeddings = LlamaEmbedding.init(Vocab, config, key=k_emb)
@@ -392,12 +404,12 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
         key=None,
         reduction: Optional[hax.ReductionFunction] = hax.mean,
         reduction_axis: Optional[hax.AxisSelection] = None,
-        policy_reg_strength: float = 0.01,
+        policy_activation_strength: float = 0.0, # Ganti dari policy_reg_strength
     ) -> NamedArray:
         logits = self(example.tokens, example.attn_mask, key=key)
         targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
-        
+
         lm_loss = hnn.cross_entropy_loss(
             logits,
             self.Vocab,
@@ -406,10 +418,10 @@ class SVDLlamaOdeLMHeadModel(eqx.Module):
             reduction_axis=reduction_axis,
             where=example.loss_mask,
         )
-        
-        policy_loss = self.transformer.get_policy_loss(policy_reg_strength)
-        
-        return lm_loss + policy_loss
+
+        activation_loss = self.transformer.get_policy_loss(activation_strength=policy_activation_strength)
+
+        return lm_loss + activation_loss
     
     @property
     def vocab_size(self) -> int:

@@ -43,8 +43,10 @@ def create_config_from_yaml(yaml_config: Dict) -> "EvaluationConfig":
     for model_cfg in yaml_config.get('model_checkpoints', []):
         checkpoint = ModelCheckpointConfig(
             name=model_cfg.get('name'),
-            checkpoint_path=model_cfg.get('checkpoint_path'),
-            config_path=model_cfg.get('config_path')
+            config_path=model_cfg.get('config_path'),
+            checkpoint_path=model_cfg.get('checkpoint_path'), 
+            vanilla_checkpoint_path=model_cfg.get('vanilla_checkpoint_path'), 
+            lora_checkpoint_path=model_cfg.get('lora_checkpoint_path')
         )
         model_checkpoints.append(checkpoint)
     datasets = []
@@ -54,21 +56,17 @@ def create_config_from_yaml(yaml_config: Dict) -> "EvaluationConfig":
             dataset_name=dataset_cfg.get('dataset_name'),
             split=dataset_cfg.get('split', 'validation'),
             dataset_config=dataset_cfg.get('dataset_config'),
-            num_samples=dataset_cfg.get('num_samples'),
-            context_key=dataset_cfg.get('context_key')
+            num_samples=dataset_cfg.get('num_samples')
         )
         datasets.append(dataset)
     eval_settings = yaml_config.get('evaluation', {})
     return EvaluationConfig(
         model_checkpoints=model_checkpoints, datasets=datasets,
         batch_size=eval_settings.get('batch_size', 4),
-        max_seq_length=eval_settings.get('max_seq_length', 512),
+        max_seq_length=eval_settings.get('max_seq_length', 1024),
         few_shot_k=eval_settings.get('few_shot_k', 0),
         seed=eval_settings.get('seed', 42),
-        output_dir=eval_settings.get('output_dir', './evaluation_results'),
-        save_individual_predictions=eval_settings.get('save_individual_predictions', False),
-        clear_cache_between_models=eval_settings.get('clear_cache_between_models', True),
-        device=eval_settings.get('device', 'gpu')
+        output_dir=eval_settings.get('output_dir', './evaluation_results')
     )
 
 
@@ -76,22 +74,26 @@ def validate_config(config: EvaluationConfig) -> List[str]:
     """Validate configuration and return list of warnings/errors."""
     issues = []
     
-    # Check model checkpoints
     for model in config.model_checkpoints:
-        if not Path(model.checkpoint_path).exists():
-            issues.append(f"WARNING: Checkpoint not found: {model.checkpoint_path}")
+        is_lora = model.lora_checkpoint_path is not None
+
+        if is_lora:
+            if not model.vanilla_checkpoint_path or not Path(model.vanilla_checkpoint_path).exists():
+                issues.append(f"WARNING: Vanilla Checkpoint not found for LoRA model '{model.name}': {model.vanilla_checkpoint_path}")
+            if not Path(model.lora_checkpoint_path).exists():
+                issues.append(f"WARNING: LoRA Checkpoint not found for LoRA model '{model.name}': {model.lora_checkpoint_path}")
+        else:
+            if not model.checkpoint_path or not Path(model.checkpoint_path).exists():
+                issues.append(f"WARNING: Pretrained Checkpoint not found for model '{model.name}': {model.checkpoint_path}")
     
-    # Check output directory
     try:
         os.makedirs(config.output_dir, exist_ok=True)
     except Exception as e:
         issues.append(f"ERROR: Cannot create output directory: {e}")
     
-    # Validate batch size
     if config.batch_size <= 0:
         issues.append("ERROR: Batch size must be positive")
     
-    # Validate few-shot k
     if config.few_shot_k < 0:
         issues.append("ERROR: few_shot_k must be non-negative")
     

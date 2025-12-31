@@ -16,7 +16,9 @@ model:
 svd_config:
   rank_ratio: 0.5
   policy_init_scale: 0.1
-  policy_reg_strength: 0.001
+  policy_reg_strength: 0.0  # L2 regularization strength
+  policy_hidden_dim_ratio: 1.0 
+  policy_activation_strength: 0.01
 
 trainer:
   wandb:
@@ -48,6 +50,8 @@ optimizer:
   weight_decay: 1e-5
   min_lr_ratio: 0.1
   epsilon: 1e-8
+  max_grad_norm: 1.0
+
 
 model_choice: llamaode-svd
 time_embed_dim: 24 

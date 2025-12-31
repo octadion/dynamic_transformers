@@ -1,0 +1,73 @@
+data:
+  cache_dir: /content/cache
+  id: Ankursingh/openwebtext_10K
+  stream: false
+  tokenizer: meta-llama/Llama-3.1-8B
+  val_ratio: 0.0005
+freeze_backbone: true
+log_task_every: 50
+log_task_performance: true
+model:
+  hidden_dim: 4096
+  intermediate_dim: 14336
+  num_heads: 32
+  num_kv_heads: 8
+  num_layers: 32
+  seq_len: 512
+  type: llama_svd
+model_choice: llamaode-svd
+multi_task:
+  add_task_prefix: true
+  cache_dir: /content/cache/datasets
+  max_samples_per_task: 50000
+  seq_len: 512
+  task_weights:
+    arc_easy: 1.0
+    hellaswag: 0.8
+    piqa: 1.0
+    sciq: 1.0
+    winogrande: 1.0
+optimizer:
+  beta1: 0.9
+  beta2: 0.999
+  learning_rate: 0.0005
+  max_grad_norm: 1.0
+  min_lr_ratio: 0.1
+  weight_decay: 0.01
+  weight_decay_modules: policy\.policy_net.*
+pretrained_cache_dir: /content/cache/hf_models
+pretrained_model_name: meta-llama/Llama-3.1-8B
+sinusodial_dim: 96
+svd_config:
+  policy_init_scale: 0.1
+  policy_reg_strength: 0.001
+  rank_ratio: 0.5
+task_batch_mixing: random
+time_embed_dim: 100
+train_policy_only: true
+train_svd_from_scratch: false
+trainer:
+  batch_axis: batch
+  checkpointer:
+    base_path: /content/drive/MyDrive/llama3_multitask_metalearning/
+    keep:
+    - every: 2000
+      until: 20000
+    save_interval: 45min
+  fsdp_axis: embed
+  mp: p=f32,c=bfloat16
+  num_train_steps: 20000
+  steps_per_eval: 200
+  tensor_parallel_axes:
+  - mlp
+  - heads
+  train_batch_size: 16
+  wandb:
+    name: llama3_8b_multitask_metalearning
+    project: qkvflow-multitask
+    tags:
+    - pretrained
+    - llama3.1
+    - svd
+    - meta-learning
+    - multi-task

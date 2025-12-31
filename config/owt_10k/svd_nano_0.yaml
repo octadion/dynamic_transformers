@@ -19,7 +19,7 @@ svd_config:
   rank_ratio: 0.5  # Keep 50% of singular values
   policy_init_scale: 0.1  # Initial random scale for policy
   policy_reg_strength: 0.0  # L2 regularization strength
-  policy_hidden_dim_ratio: 0.1 
+  policy_hidden_dim_ratio: 0.0 
   policy_activation_strength: 0.01
 trainer:
   wandb:

@@ -1,43 +1,79 @@
 model_checkpoints:
-  - name: "GPT2 SVD Neural ODE"
-    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/wbgh5v26"
-    config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano.yaml"
+  # - name: "GPT2 SVD Neural ODE"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/wbgh5v26"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano.yaml"
 
-  - name: "Llama SVD Neural ODE"
-    checkpoint_path: "/content/drive/MyDrive/nano_llama_svd_checkpoints/m8zp9g3g"
-    config_path: "/content/dynamic-transformers/config/owt_10k/svd_llama_nano.yaml"
+  - name: "GPT2 SVD Neural ODE 1.0"
+    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/v31mah3j"
+    config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano_1.yaml"
 
-  - name: "GPT2 Baseline"
-    checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
-    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
+  # - name: "GPT2 SVD Neural ODE 0.5"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/dxugbgv7"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano_05.yaml"
 
-  - name: "Llama Baseline"
-    checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
-    config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
+  # - name: "GPT2 SVD Neural ODE 2.0"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/xh3r166n"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano_2.yaml"
 
-  - name: "GPT2 Neural ODE"
-    checkpoint_path: "/content/drive/MyDrive/neural_ode/neural_ode_checkpoints/gm98wcx5"
-    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_ode_nano.yaml"
+  # - name: "GPT2 SVD Neural ODE 0.1"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_gpt2_svd_checkpoints/ie5epp0j"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_nano_01.yaml"
 
-  - name: "Llama Neural ODE"
-    checkpoint_path: "/content/drive/MyDrive/nano_llama_neuralode_checkpoints/wh1ckolb"
-    config_path: "/content/dynamic-transformers/config/owt_10k/llama_ode_nano.yaml"
+  # - name: "Llama SVD Neural ODE 1.0"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_svd_checkpoints/j7w7ox2n"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_llama_nano.yaml"
 
-  - name: "GPT2 LoRA (Winogrande)"
-    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/gpt2_winogrande_merged"
-    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
+  # - name: "Llama SVD Neural ODE"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_svd_checkpoints/j9fe3ou9"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/svd_llama_nano.yaml"
 
-  - name: "Llama LoRA (Winogrande)"
-    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/llama_winogrande_merged"
-    config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
+  # - name: "GPT2 Baseline"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
 
-  - name: "GPT2 LoRA (SciQ)"
-    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/gpt2_sciq_merged"
-    config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_nano.yaml"
+  # - name: "Llama Baseline"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
 
-  - name: "Llama LoRA (SciQ)"
-    checkpoint_path: "/content/drive/MyDrive/merged_checkpoints/llama_sciq_merged"
-    config_path: "/content/dynamic-transformers/config/owt_10k/llama_nano.yaml"
+  # - name: "GPT2 Neural ODE"
+  #   checkpoint_path: "/content/drive/MyDrive/neural_ode/neural_ode_checkpoints/gm98wcx5"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/gpt2_ode_nano.yaml"
+
+  # - name: "Llama Neural ODE"
+  #   checkpoint_path: "/content/drive/MyDrive/nano_llama_neuralode_checkpoints/wh1ckolb"
+  #   config_path: "/content/dynamic-transformers/config/owt_10k/llama_ode_nano.yaml"
+
+
+  # - name: "GPT2 LoRA (Winogrande) - Direct Eval"
+  #   config_path: "/content/dynamic-transformers/config/finetune/finetune_gpt2_lora_winogrande.yaml"
+  #   vanilla_checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
+  #   lora_checkpoint_path: "/content/drive/MyDrive/lora_finetuned_checkpoints_gpt2_winogrande/it2pzku2/step-1500"
+
+  # - name: "Llama LoRA (Winogrande)  - Direct Eval"
+  #   config_path: "/content/dynamic-transformers/config/finetune/finetune_llama_lora_winogrande.yaml"
+  #   vanilla_checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
+  #   lora_checkpoint_path: "/content/drive/MyDrive/lora_finetuned_checkpoints_winogrande/a2i8zfcc/step-2500"
+
+  # - name: "GPT2 LoRA (SciQ)  - Direct Eval"
+  #   config_path: "/content/dynamic-transformers/config/finetune/finetune_gpt2_lora_sciq.yaml"
+  #   vanilla_checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
+  #   lora_checkpoint_path: "/content/drive/MyDrive/lora_finetuned_checkpoints_gpt2/j2x4vncp/step-500"
+
+  # - name: "Llama LoRA (SciQ)  - Direct Eval"
+  #   config_path: "/content/dynamic-transformers/config/finetune/finetune_llama_lora_sciq.yaml"
+  #   vanilla_checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
+  #   lora_checkpoint_path: "/content/drive/MyDrive/lora_finetuned_checkpoints/mb9rt5lu/step-1000"
+  
+  # - name: "GPT2 LoRA (Arc)  - Direct Eval"
+  #   config_path: "/content/dynamic-transformers/config/finetune/finetune_gpt2_lora_arc.yaml"
+  #   vanilla_checkpoint_path: "/content/drive/MyDrive/nano_gpt2_checkpoints/u4c2ysp0"
+  #   lora_checkpoint_path: "/content/drive/MyDrive/lora_finetuned_checkpoints_gpt2/w8hv3l60/step-500"
+
+  # - name: "Llama LoRA (Arc)  - Direct Eval"
+  #   config_path: "/content/dynamic-transformers/config/finetune/finetune_llama_lora_arc.yaml"
+  #   vanilla_checkpoint_path: "/content/drive/MyDrive/nano_llama_checkpoints/62t179nh"
+  #   lora_checkpoint_path: "/content/drive/MyDrive/lora_finetuned_checkpoints/hrabgfhy/step-1000"
+  
     
   
 
@@ -53,23 +89,47 @@ datasets:
   #   split: "validation"
   #   num_samples: null
 
+  - name: "SciQ"
+    dataset_name: "sciq"
+    split: "test"
+    context_key: "support"
+    num_samples: 50
+    
+  - name: "Winogrande"
+    dataset_name: "/content/data/winogrande/validation-00000-of-00001.parquet"
+    dataset_config: null
+    split: null
+    num_samples: 50
+
+  - name: "ARC-Challenge"
+    dataset_name: "/content/data/arc/test-00000-of-00001.parquet"
+    dataset_config: null
+    split: null
+    num_samples: 50
+
+  # - name: "humaneval"
+  #   dataset_name: "openai_humaneval"
+  #   split: "test"
+  #   num_samples: null
+
   # - name: "SciQ"
   #   dataset_name: "sciq"
   #   split: "test"
   #   context_key: "support"
   #   num_samples: null
-    
-  - name: "Winogrande"
-    dataset_name: "winogrande"
-    dataset_config: "winogrande_xl"
-    split: "test"
-    num_samples: null
+
+  # - name: "Winogrande"
+  #   dataset_name: "winogrande"
+  #   dataset_config: "winogrande_xl"
+  #   split: "validation"
+  #   num_samples: null
+  
 
 evaluation:
   batch_size: 16
   max_seq_length: 512
   few_shot_k: 0
   seed: 42
-  output_dir: "/content/drive/MyDrive/evaluation_results_winogrande"
+  output_dir: "/content/drive/MyDrive/20"
   save_individual_predictions: false
   clear_cache_between_models: true

@@ -79,7 +79,7 @@ class AdaptiveBlock(eqx.Module):
 
         k_gate_fc, k_gate_proj = jrandom.split(k_gate)
         
-        initial_logit_value = -2.0
+        initial_logit_value = 0.0
         
         Scalar = hax.Axis("scalar", 1)
         gate_logit_fc = hax.named(jnp.full((), initial_logit_value, dtype=jnp.float32), ())
@@ -101,7 +101,7 @@ class AdaptiveBlock(eqx.Module):
         
         return AdaptiveBlock(config, attn_ln, attn, mlp_ln, adaptive_mlp, resid_dropout)
     
-    def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key):
+    def __call__(self, time_embed, x: NamedArray, mask, layer_idx, multipliers: Dict[str, NamedArray], *, key, return_diagnostics: bool = False):
         k1, k2, k3, k4 = maybe_rng_split(key, 4)
         
         attn_output = self.attn(
@@ -113,15 +113,29 @@ class AdaptiveBlock(eqx.Module):
         )
         attn_output = self.resid_dropout(attn_output, key=k2)
         
-        ff_output = self.mlp(
-            time_embed=time_embed,
-            x=self.mlp_ln(time_embed, x),
-            multipliers=multipliers,
-            key=k3,
-        )
-        ff_output = self.resid_dropout(ff_output, key=k4)
-        
-        return attn_output + ff_output
+        residual = x + attn_output
+
+        mlp_input = self.mlp_ln(time_embed, residual)
+
+        if return_diagnostics:
+            ff_output, diagnostics = self.mlp(
+                time_embed=time_embed,
+                x=mlp_input,
+                multipliers=multipliers,
+                key=k3,
+                return_diagnostics=True
+            )
+            ff_output = self.resid_dropout(ff_output, key=k4)
+            return residual + ff_output, diagnostics
+        else:
+            ff_output = self.mlp(
+                time_embed=time_embed,
+                x=mlp_input,
+                multipliers=multipliers,
+                key=k3,
+            )
+            ff_output = self.resid_dropout(ff_output, key=k4)
+            return residual + ff_output
 
 
 class AdaptiveTemporalMLP(eqx.Module):
@@ -134,7 +148,7 @@ class AdaptiveTemporalMLP(eqx.Module):
     gate_logit_proj: hax.NamedArray
     
     @named_call
-    def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None):
+    def __call__(self, time_embed: NamedArray, x: NamedArray, multipliers: Dict[str, NamedArray], *, key=None, return_diagnostics: bool = False):
         w_fc_temporal, b_fc_temporal = self.c_fc_temporal.evaluate_at_components(time_embed)
         w_proj_temporal, b_proj_temporal = self.c_proj_temporal.evaluate_at_components(time_embed)
         
@@ -185,7 +199,14 @@ class AdaptiveTemporalMLP(eqx.Module):
         if b_proj_eff is not None:
             x = x + b_proj_eff
             
-        return x
+        if return_diagnostics:
+            diagnostics = {
+                "gate_fc": gate_fc_raw,
+                "gate_proj": gate_proj_raw,
+            }
+            return x, diagnostics
+        else:
+            return x
 
 
 class SVDNeuralOdeTransformer(eqx.Module):
@@ -207,6 +228,7 @@ class SVDNeuralOdeTransformer(eqx.Module):
         sinusodial_dim,
         rank_ratio: float = 0.5,
         policy_init_scale: float = 0.1,
+        policy_hidden_dim_ratio: float = 4.0,
         *,
         key,
     ):
@@ -239,6 +261,7 @@ class SVDNeuralOdeTransformer(eqx.Module):
             num_layers=config.num_layers,
             rank_per_layer=rank_per_layer,
             task_vector_dim=config.Embed,
+            hidden_dim_ratio=policy_hidden_dim_ratio,
             key=k_policy,
         )
         
@@ -246,7 +269,7 @@ class SVDNeuralOdeTransformer(eqx.Module):
             config, time_embeding, block, ln_f, policy, dt, rank_ratio
         )
     
-    def __call__(self, x: NamedArray, attn_mask, *, key=None) -> NamedArray:
+    def __call__(self, x: NamedArray, attn_mask, *, key=None, return_diagnostics: bool = False) -> NamedArray:
         t = (hax.arange(self.config.Layers, dtype=x.dtype) + 1) * self.dt
         dts = hax.ones((self.config.Layers,), dtype=x.dtype) * self.dt
         time_embed = self.time_embedding(t)
@@ -254,23 +277,24 @@ class SVDNeuralOdeTransformer(eqx.Module):
 
         num_warmup_layers = min(3, self.config.num_layers // 4)
 
-        def make_do_block(layer_idx, layer_key, current_multipliers):
-            def do_block(x_in):
-                layer_multipliers = {
-                    "c_fc": current_multipliers.get(f"layer_{layer_idx}_c_fc"),
-                    "c_proj": current_multipliers.get(f"layer_{layer_idx}_c_proj"),
-                }
-                
-                output = self.block(
-                    time_embed.take("layers", layer_idx), 
-                    x_in, 
-                    attn_mask, 
-                    layer_idx, 
-                    multipliers=layer_multipliers, 
-                    key=layer_key
+        def do_block_fn(x_in, layer_idx, layer_key, current_multipliers, is_adaptive_phase):
+            layer_multipliers = {
+                "c_fc": current_multipliers.get(f"layer_{layer_idx}_c_fc"),
+                "c_proj": current_multipliers.get(f"layer_{layer_idx}_c_proj"),
+            }
+
+            if return_diagnostics and is_adaptive_phase:
+                output, diagnostics = self.block(
+                    time_embed.take("layers", layer_idx), x_in, attn_mask, 
+                    layer_idx, multipliers=layer_multipliers, key=layer_key, return_diagnostics=True
                 )
-                return x_in + output * dts.take("layers", layer_idx)
-            return do_block
+                return x_in + output, diagnostics # ODE solve step dipindahkan ke loop utama
+            else:
+                output = self.block(
+                    time_embed.take("layers", layer_idx), x_in, attn_mask, 
+                    layer_idx, multipliers=layer_multipliers, key=layer_key, return_diagnostics=False
+                )
+                return x_in + output, None # Kembalikan None untuk diagnostik
 
         Batch = x.axes[0]
         identity_multipliers = {}
@@ -281,26 +305,55 @@ class SVDNeuralOdeTransformer(eqx.Module):
                     rank_axis = self.policy.rank_shapes[param_key][0]
                     identity_multipliers[param_key] = hax.ones((Batch, rank_axis))
 
+        # Fase Warmup
         x_processed = x
         for i in range(num_warmup_layers):
-            do_block_warmup = make_do_block(i, keys[i], identity_multipliers)
-            x_processed = jax.checkpoint(do_block_warmup, prevent_cse=False)(x_processed)
+            block_fn_for_checkpoint = lambda x_arg: do_block_fn(x_arg, i, keys[i], identity_multipliers, is_adaptive_phase=False)[0]
+            ode_update = jax.checkpoint(block_fn_for_checkpoint, prevent_cse=False)(x_processed)
+            x_processed = ode_update * dts.take("layers", i)
 
-        task_vector = hax.mean(x_processed, axis="position")
+
+        task_vector = x_processed.take("position", 0)
         adaptive_multipliers = self.policy(task_vector)
+
+        all_diagnostics = {}
+        if return_diagnostics:
+            all_diagnostics["multipliers"] = adaptive_multipliers
+            all_diagnostics["gate_values"] = {}
 
         x_final = x_processed
         for i in range(num_warmup_layers, self.config.num_layers):
-            do_block_adaptive = make_do_block(i, keys[i], adaptive_multipliers)
-            x_final = jax.checkpoint(do_block_adaptive, prevent_cse=False)(x_final)
-        
-        x_final = self.ln_f(x_final)
-        return x_final
+            if return_diagnostics:
+                block_fn_for_checkpoint = lambda x_arg: do_block_fn(x_arg, i, keys[i], adaptive_multipliers, is_adaptive_phase=True)
+                ode_update, layer_diagnostics = jax.checkpoint(block_fn_for_checkpoint, prevent_cse=False)(x_final)
+                all_diagnostics["gate_values"][f"layer_{i}"] = layer_diagnostics
+            else:
+                block_fn_for_checkpoint = lambda x_arg: do_block_fn(x_arg, i, keys[i], adaptive_multipliers, is_adaptive_phase=False)[0]
+                ode_update = jax.checkpoint(block_fn_for_checkpoint, prevent_cse=False)(x_final)
 
-    def get_policy_loss(self, reg_strength: float = 0.01) -> jax.Array:
-        params = eqx.filter(self.policy.policy_net, eqx.is_array)
-        loss = sum(jnp.sum(p**2) for p in jax.tree_util.tree_leaves(params))
-        return loss * reg_strength
+            x_final = ode_update * dts.take("layers", i)
+
+        x_final = self.ln_f(x_final)
+
+        if return_diagnostics:
+            return x_final, all_diagnostics
+        else:
+            return x_final
+
+    def get_policy_loss(self, activation_strength: float = 0.01) -> jax.Array:
+        params = self.policy.get_policy_params()
+        leaf_arrays = jax.tree_util.tree_leaves(eqx.filter(params, eqx.is_array))
+
+        if not leaf_arrays:
+            return jnp.array(0.0)
+
+        flat_params = jnp.concatenate([jnp.ravel(p.astype(jnp.float32)) for p in leaf_arrays])
+
+        std_dev = jnp.std(flat_params)
+
+        activation_loss = 1.0 / (std_dev + 1e-6)
+
+        return activation_loss * activation_strength
 
 
 class SVDNeuralOdeLMHeadModel(eqx.Module):
@@ -330,6 +383,7 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
         sinusodial_dim=16,
         rank_ratio=0.5,
         policy_init_scale=0.1,
+        policy_hidden_dim_ratio=4.0,
         *,
         key,
     ) -> "SVDNeuralOdeLMHeadModel":
@@ -340,21 +394,25 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
             sinusodial_dim=sinusodial_dim,
             rank_ratio=rank_ratio,
             policy_init_scale=policy_init_scale,
+            policy_hidden_dim_ratio=policy_hidden_dim_ratio,
             key=k_t,
         )
         embeddings = Gpt2Embeddings.init(Vocab, config, key=k_embeddings)
         
         return SVDNeuralOdeLMHeadModel(transformer, embeddings)
     
-    def __call__(
-        self, input_ids: NamedArray, attn_mask=None, *, key=None
-    ) -> NamedArray:
+    def __call__(self, input_ids: NamedArray, attn_mask=None, *, key=None, return_diagnostics: bool = False) -> NamedArray:
         k_embed, k_transformer = maybe_rng_split(key, 2)
         x = self.embeddings.embed(input_ids, key=k_embed)
-        x = self.transformer(x, attn_mask, key=k_transformer)
-        lm_logits = self.embeddings.unembed(x)
-        
-        return lm_logits
+
+        if return_diagnostics:
+            x, diagnostics = self.transformer(x, attn_mask, key=k_transformer, return_diagnostics=True)
+            lm_logits = self.embeddings.unembed(x)
+            return lm_logits, diagnostics
+        else:
+            x = self.transformer(x, attn_mask, key=k_transformer)
+            lm_logits = self.embeddings.unembed(x)
+            return lm_logits
     
     def compute_loss(
         self,
@@ -363,13 +421,13 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
         key=None,
         reduction: Optional[hax.ReductionFunction] = hax.mean,
         reduction_axis: Optional[hax.AxisSelection] = None,
-        policy_reg_strength: float = 0.01,
+        policy_activation_strength: float = 0.0, # Argumen baru
     ) -> NamedArray:
-        """Compute language modeling loss with policy regularization."""
+        """Compute language modeling loss with policy activation loss."""
         logits = self(example.tokens, example.attn_mask, key=key)
         targets = hax.roll(example.tokens, -1, axis=self.Pos.name)
         target_y = hax.nn.one_hot(targets, self.Vocab, dtype=logits.dtype)
-        
+
         lm_loss = hnn.cross_entropy_loss(
             logits,
             self.Vocab,
@@ -378,11 +436,9 @@ class SVDNeuralOdeLMHeadModel(eqx.Module):
             reduction_axis=reduction_axis,
             where=example.loss_mask,
         )
-        
-        # Add policy regularization
-        policy_loss = self.transformer.get_policy_loss(policy_reg_strength)
-        
-        return lm_loss + policy_loss
+        activation_loss = self.transformer.get_policy_loss(activation_strength=policy_activation_strength)
+
+        return lm_loss + activation_loss
     
     @property
     def vocab_size(self) -> int:

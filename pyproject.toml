@@ -1,7 +1,7 @@
 [project]
 name = "qkvflow"
 version = "0.0.1"
-description = "Neural ODE Transformers"
+description = "PCSVM Neural ODE Transformers"
 
 [build-system]
 requires = ["hatchling"]

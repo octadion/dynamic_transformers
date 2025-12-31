@@ -2,57 +2,31 @@ import logging
 import os
 from dataclasses import fields
 from typing import Optional, Dict, Any
-import jax
-import jax.numpy as jnp
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-# Import levanter dynamic untuk akses config
 import levanter.models.llama as levanter_llama
 
 logger = logging.getLogger(__name__)
 
-def load_llama_from_hf(
-    model_name: str,
-    cache_dir: Optional[str] = None,
-    torch_dtype: str = "float16",
-):
-    """
-    Load Llama model from HuggingFace Hub with Low Memory optimization.
-    """
+def load_llama_from_hf(model_name: str, cache_dir: Optional[str] = None, torch_dtype: str = "float16"):
     logger.info(f"Loading {model_name} (Low Memory Mode)...")
     token = os.environ.get("HF_TOKEN")
-    
-    # Load Config & Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=token, cache_dir=cache_dir)
     config = AutoConfig.from_pretrained(model_name, token=token, cache_dir=cache_dir)
-    
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
-    # Load Model Weights (CPU Offload first to save GPU RAM)
-    logger.info("Loading model weights (this may take a while)...")
+    # Force CPU load first to save GPU RAM for JAX
     try:
         pt_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            config=config,
-            cache_dir=cache_dir,
-            token=token,
-            torch_dtype=getattr(torch, torch_dtype),
-            low_cpu_mem_usage=True,
-            device_map="cpu" 
+            model_name, config=config, cache_dir=cache_dir, token=token,
+            torch_dtype=getattr(torch, torch_dtype), low_cpu_mem_usage=True, device_map="cpu"
         )
-    except Exception as e:
-        logger.warning(f"Failed to load with device_map='cpu', retrying standard load: {e}")
+    except Exception:
         pt_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            config=config,
-            cache_dir=cache_dir,
-            token=token,
-            torch_dtype=getattr(torch, torch_dtype),
-            low_cpu_mem_usage=True
+            model_name, config=config, cache_dir=cache_dir, token=token,
+            torch_dtype=getattr(torch, torch_dtype), low_cpu_mem_usage=True
         )
 
-    # Collect Model Info
     model_info = {
         "hidden_size": config.hidden_size,
         "num_hidden_layers": config.num_hidden_layers,
@@ -64,18 +38,11 @@ def load_llama_from_hf(
         "rope_theta": getattr(config, "rope_theta", 10000.0),
         "max_position_embeddings": getattr(config, "max_position_embeddings", 2048),
     }
-
     return pt_model, tokenizer, model_info
 
 def convert_llama_config_from_hf(model_info: Dict[str, Any]):
-    """
-    Smart conversion from HF dict to Levanter LlamaConfig.
-    Adapts to available fields in the installed Levanter version.
-    """
     LlamaConfig = levanter_llama.LlamaConfig
     valid_fields = {f.name for f in fields(LlamaConfig)}
-    
-    # Base arguments
     args = {
         "seq_len": model_info.get("max_position_embeddings", 2048),
         "hidden_dim": model_info["hidden_size"],
@@ -84,24 +51,14 @@ def convert_llama_config_from_hf(model_info: Dict[str, Any]):
         "intermediate_dim": model_info["intermediate_size"],
         "use_flash_attention": True,
     }
-
-    # Handle GQA (Grouped Query Attention) fields dynamically
     kv_heads = model_info["num_key_value_heads"]
+    if "num_kv_heads" in valid_fields: args["num_kv_heads"] = kv_heads
+    elif "kv_heads" in valid_fields: args["kv_heads"] = kv_heads
     
-    if "num_kv_heads" in valid_fields:
-        args["num_kv_heads"] = kv_heads
-    elif "kv_heads" in valid_fields:
-        args["kv_heads"] = kv_heads
-    else:
-        logger.warning("LlamaConfig missing num_kv_heads field. GQA might be ignored.")
-
-    # Filter arguments to ensure compatibility
     final_args = {k: v for k, v in args.items() if k in valid_fields}
-    
     return LlamaConfig(**final_args)
 
 def extract_mlp_weight(model, layer_idx):
-    """Extract MLP weights for SVD initialization."""
     layer = model.model.layers[layer_idx]
     gate_proj = layer.mlp.gate_proj.weight.detach().cpu().numpy()
     up_proj = layer.mlp.up_proj.weight.detach().cpu().numpy()

@@ -13,28 +13,27 @@ model:
   num_heads: 32
   num_kv_heads: 8
   num_layers: 32
-  seq_len: 512
+  seq_len: 2048
   type: llama_svd
+  # Memory Optimization Flags
+  gradient_checkpointing: true
+  gradient_checkpointing_block_size: 5
 model_choice: llamaode-svd
 multi_task:
   add_task_prefix: true
   cache_dir: /content/cache/datasets
   max_samples_per_task: 50000
-  seq_len: 512
+  seq_len: 2048
   task_weights:
     arc_easy: 1.0
     hellaswag: 0.8
     piqa: 1.0
     sciq: 1.0
     winogrande: 1.0
+# Optimizer is ignored (overridden by Adafactor in code), but kept for structure
 optimizer:
-  beta1: 0.9
-  beta2: 0.999
   learning_rate: 0.0005
-  max_grad_norm: 1.0
-  min_lr_ratio: 0.1
   weight_decay: 0.01
-  weight_decay_modules: policy\.policy_net.*
 pretrained_cache_dir: /content/cache/hf_models
 pretrained_model_name: meta-llama/Llama-3.1-8B
 sinusodial_dim: 96
@@ -61,13 +60,8 @@ trainer:
   tensor_parallel_axes:
   - mlp
   - heads
-  train_batch_size: 16
+  train_batch_size: 32
+  per_device_parallelism: 1
   wandb:
     name: llama3_8b_multitask_metalearning
     project: qkvflow-multitask
-    tags:
-    - pretrained
-    - llama3.1
-    - svd
-    - meta-learning
-    - multi-task
